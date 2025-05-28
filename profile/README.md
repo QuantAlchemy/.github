@@ -1,19 +1,19 @@
 <div align="center">
   <img src="qa-hero.webp" alt="QuantAlchemy Banner" width="100%">
-  <h3>Helping algo traders algo trade better</h3>
+  <h3>Empowering algorithmic and systematic traders with intelligent tools</h3>
 </div>
 
 # QuantAlchemy
 
-[QuantAlchemy](https://www.quantalchemy.io/) is dedicated to building innovative tools that empower algorithmic traders to perform better in the markets. Our open-source projects focus on creating robust, efficient, and user-friendly solutions for all levels of algo trading.
+[QuantAlchemy](https://www.quantalchemy.io/) is dedicated to building innovative tools that empower algorithmic and systematic traders to perform better in the markets. Our open-source projects focus on creating robust, efficient, and user-friendly solutions for all levels of trading.
 
 ## Our Vision
 
-We don't just provide tools; we offer a gateway to freedom. Say goodbye to the days spent chained to monitors, watching lines zigzag across screens. Our team and software liberates you from the grind, opening up a world where your time is yours to enjoy, whether that means scaling mountain peaks or spending precious moments with family. Welcome to a world where your algo trading flourishes — thoughtfully, steadily, brilliantly.
+We don't just provide tools; we offer a gateway to freedom. Say goodbye to the days spent chained to monitors, watching lines zigzag across screens. Our team and software liberates you from the grind, opening up a world where your time is yours to enjoy, whether that means scaling mountain peaks or spending precious moments with family. Welcome to a world where your trading flourishes — thoughtfully, steadily, brilliantly.
 
 ## Our Mission
 
-At QuantAlchemy, we believe in the power of technology and collaboration to transform algo trading. We work on:
+At QuantAlchemy, we believe in the power of technology and collaboration to transform trading. We work on:
 
 - **Developing Trading Tools:** Creating reliable and efficient tools for market analysis and strategy development.
 - **Empowering Traders:** Enabling traders to make data-driven decisions with enhanced capabilities.
@@ -29,7 +29,7 @@ At QuantAlchemy, we believe in the power of technology and collaboration to tran
 
 ## Projects
 
-Our public repositories include a variety of projects aimed at serving the algo trading community. Some key areas include:
+Our public repositories include a variety of projects aimed at serving the trading community. Some key areas include:
 
 - **Data Analysis and Visualization**
 - **Algorithmic Strategy Backtesting**
