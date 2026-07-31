@@ -1,0 +1,39 @@
+{
+  "sites": [
+    {
+      "name": "Quant Alchemy",
+      "origin": "https://www.quantalchemy.io",
+      "repository": "QuantAlchemy/qa-website"
+    },
+    {
+      "name": "Krown Quant Alchemy",
+      "origin": "https://www.krown.quantalchemy.io",
+      "repository": "QuantAlchemy/krown-website"
+    },
+    {
+      "name": "Krong AI",
+      "origin": "https://www.krong.ai",
+      "repository": "QuantAlchemy/krown-ai"
+    },
+    {
+      "name": "AI Algo Factory",
+      "origin": "https://ai-algo-factory.quantalchemy.io",
+      "repository": "QuantAlchemy/ai-algo-factory"
+    },
+    {
+      "name": "Jest",
+      "origin": "https://jest.quantalchemy.io",
+      "repository": "QuantAlchemy/jest-qa"
+    },
+    {
+      "name": "Quant Companion",
+      "origin": "https://www.quant-companion.quantalchemy.io",
+      "repository": "QuantAlchemy/quant-companion"
+    },
+    {
+      "name": "ClickAlchemy",
+      "origin": "https://www.clickalchemy.ai",
+      "repository": "QuantAlchemy/clickalchemy"
+    }
+  ]
+}
