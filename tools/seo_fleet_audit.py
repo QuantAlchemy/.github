@@ -32,6 +32,8 @@ class SiteConfig:
     name: str
     origin: str
     repository: str = ""
+    expected_text_paths: tuple[str, ...] = ()
+    required_canonical_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         origin = self.origin.rstrip("/")
@@ -56,6 +58,23 @@ class SiteConfig:
                 f"{self.name}: origin must be an HTTPS origin without a path: {self.origin}"
             )
         object.__setattr__(self, "origin", origin)
+        for field_name in ("expected_text_paths", "required_canonical_paths"):
+            paths = tuple(dict.fromkeys(getattr(self, field_name)))
+            for path in paths:
+                parsed_path = urlsplit(path)
+                if (
+                    not path.startswith("/")
+                    or path.startswith("//")
+                    or parsed_path.scheme
+                    or parsed_path.netloc
+                    or parsed_path.query
+                    or parsed_path.fragment
+                ):
+                    raise ValueError(
+                        f"{self.name}: {field_name} entries must be root-relative paths "
+                        f"without query or fragment: {path}"
+                    )
+            object.__setattr__(self, field_name, paths)
 
 
 @dataclass(frozen=True)
@@ -318,6 +337,44 @@ def audit_site(
                 root.content_type or "missing Content-Type",
             )
 
+    for path in site.expected_text_paths:
+        expected_url = f"{site.origin}{path}"
+        text_receipt = fetch(expected_url)
+        _check_http_receipt(audit, text_receipt, "EXPECTED_TEXT", expected_url)
+        if (
+            text_receipt.status == 200
+            and "text/plain" not in text_receipt.content_type.lower()
+        ):
+            _finding(
+                audit,
+                "EXPECTED_TEXT_CONTENT_TYPE",
+                expected_url,
+                "text/plain",
+                text_receipt.content_type or "missing Content-Type",
+            )
+
+    for path in site.required_canonical_paths:
+        expected_url = f"{site.origin}{path}"
+        page = fetch(expected_url)
+        _check_http_receipt(audit, page, "REQUIRED_CANONICAL", expected_url)
+        if page.status == 200:
+            if _is_html(page):
+                _check_canonical(
+                    audit,
+                    page,
+                    expected_url,
+                    "REQUIRED_CANONICAL",
+                    required=True,
+                )
+            else:
+                _finding(
+                    audit,
+                    "REQUIRED_CANONICAL_CONTENT_TYPE",
+                    expected_url,
+                    "text/html",
+                    page.content_type or "missing Content-Type",
+                )
+
     robots_url = f"{site.origin}/robots.txt"
     robots = fetch(robots_url)
     _check_http_receipt(audit, robots, "ROBOTS", robots_url)
@@ -388,10 +445,23 @@ def _check_http_receipt(
 
 
 def _check_canonical(
-    audit: SiteAudit, receipt: FetchReceipt, expected_url: str, prefix: str
+    audit: SiteAudit,
+    receipt: FetchReceipt,
+    expected_url: str,
+    prefix: str,
+    *,
+    required: bool = False,
 ) -> None:
     canonicals = extract_canonicals(receipt.body)
     if not canonicals:
+        if required:
+            _finding(
+                audit,
+                f"{prefix}_MISSING",
+                receipt.requested_url,
+                expected_url,
+                "no canonical link",
+            )
         return
     if len(canonicals) != 1 or not urls_equivalent(canonicals[0], expected_url):
         _finding(
