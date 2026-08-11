@@ -13,7 +13,15 @@
     {
       "name": "Krong AI",
       "origin": "https://www.krong.ai",
-      "repository": "QuantAlchemy/krown-ai"
+      "repository": "QuantAlchemy/krown-ai",
+      "expected_text_paths": [
+        "/llms.txt",
+        "/ai.txt"
+      ],
+      "required_canonical_paths": [
+        "/",
+        "/progress"
+      ]
     },
     {
       "name": "AI Algo Factory",

@@ -69,6 +69,150 @@ class SeoFleetAuditTests(unittest.TestCase):
         self.assertEqual(4, audit.checked_urls)
         self.assertEqual(2, audit.sitemap_urls)
 
+    def test_site_contract_reports_four_krong_artifact_defects(self) -> None:
+        origin = "https://www.krong.ai"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Krong AI</title></html>",
+                ),
+                f"{origin}/progress": FetchReceipt(
+                    requested_url=f"{origin}/progress",
+                    status=200,
+                    final_url=f"{origin}/progress",
+                    content_type="text/html",
+                    body="<html><title>Progress</title></html>",
+                ),
+                f"{origin}/llms.txt": FetchReceipt(
+                    requested_url=f"{origin}/llms.txt",
+                    status=404,
+                    final_url=f"{origin}/llms.txt",
+                    content_type="text/html",
+                    body="not found",
+                ),
+                f"{origin}/ai.txt": FetchReceipt(
+                    requested_url=f"{origin}/ai.txt",
+                    status=404,
+                    final_url=f"{origin}/ai.txt",
+                    content_type="text/html",
+                    body="not found",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"Sitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Krong AI",
+                origin=origin,
+                expected_text_paths=("/llms.txt", "/ai.txt"),
+                required_canonical_paths=("/", "/progress"),
+            ),
+            fetch,
+        )
+        receipts = {(finding.code, finding.url) for finding in audit.findings}
+
+        self.assertEqual(
+            {
+                ("EXPECTED_TEXT_HTTP_STATUS", f"{origin}/llms.txt"),
+                ("EXPECTED_TEXT_HTTP_STATUS", f"{origin}/ai.txt"),
+                ("REQUIRED_CANONICAL_MISSING", f"{origin}/"),
+                ("REQUIRED_CANONICAL_MISSING", f"{origin}/progress"),
+            },
+            receipts,
+        )
+        report = render_markdown([audit])
+        for path in ("/", "/progress", "/llms.txt", "/ai.txt"):
+            self.assertIn(f"`{origin}{path}`", report)
+
+    def test_site_contract_accepts_expected_text_and_canonical_paths(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body=f'<link rel="canonical" href="{origin}/">',
+                ),
+                f"{origin}/progress": FetchReceipt(
+                    requested_url=f"{origin}/progress",
+                    status=200,
+                    final_url=f"{origin}/progress",
+                    content_type="text/html",
+                    body=f'<link rel="canonical" href="{origin}/progress">',
+                ),
+                f"{origin}/llms.txt": FetchReceipt(
+                    requested_url=f"{origin}/llms.txt",
+                    status=200,
+                    final_url=f"{origin}/llms.txt",
+                    content_type="text/plain; charset=utf-8",
+                    body="# Example",
+                ),
+                f"{origin}/ai.txt": FetchReceipt(
+                    requested_url=f"{origin}/ai.txt",
+                    status=200,
+                    final_url=f"{origin}/ai.txt",
+                    content_type="text/plain",
+                    body="See /llms.txt",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"Sitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        f"<url><loc>{origin}/progress</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                expected_text_paths=("/llms.txt", "/ai.txt"),
+                required_canonical_paths=("/", "/progress"),
+            ),
+            fetch,
+        )
+
+        self.assertEqual([], audit.findings)
+        self.assertEqual(6, audit.checked_urls)
+
     def test_reports_exact_wrong_host_redirect_and_broken_url_receipts(self) -> None:
         origin = "https://example.com"
         foreign = "https://preview.example.net"
@@ -167,6 +311,21 @@ class SeoFleetAuditTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 with self.assertRaises(ValueError):
                     SiteConfig(name="Unsafe", origin=origin)
+
+    def test_site_contract_rejects_non_path_expectations(self) -> None:
+        for field, value in [
+            ("expected_text_paths", "https://foreign.example/llms.txt"),
+            ("expected_text_paths", "llms.txt"),
+            ("required_canonical_paths", "/progress?preview=1"),
+            ("required_canonical_paths", "//foreign.example/progress"),
+        ]:
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    SiteConfig(
+                        name="Unsafe",
+                        origin="https://example.com",
+                        **{field: (value,)},
+                    )
 
     def test_reports_a_non_html_root(self) -> None:
         origin = "https://example.com"
