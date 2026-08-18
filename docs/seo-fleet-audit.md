@@ -4,6 +4,7 @@
 
 For every site in `config/public-sites.json`, the crawler verifies:
 
+- the GitHub repository homepage matches the configured canonical production origin;
 - the root resolves to canonical HTTP 200 HTML;
 - the root canonical link, when declared, matches the configured production origin;
 - `robots.txt` is direct, plain text, and references the canonical sitemap;
@@ -13,7 +14,7 @@ For every site in `config/public-sites.json`, the crawler verifies:
 - configured `expected_text_paths` such as `llms.txt` and `ai.txt` return direct HTTP 200 plain text;
 - configured `required_canonical_paths` return direct HTTP 200 HTML and declare exactly one matching canonical link.
 
-The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing.
+The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
 ## Local verification
 
