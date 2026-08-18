@@ -41,6 +41,24 @@ class SeoFleetAuditTests(unittest.TestCase):
                 )
                 self.assertEqual([], findings)
 
+        for homepage in (
+            "http://www.example.com",
+            "https://example.com",
+            "https://WWW.example.com",
+            "https://www.example.com/pricing",
+            "https://www.example.com?preview=1",
+            "https://www.example.com#preview",
+            "https://www.example.com////",
+        ):
+            with self.subTest(homepage=homepage):
+                findings = seo_fleet_audit.audit_repository_homepage(
+                    site, lambda _repository: homepage
+                )
+                self.assertEqual(
+                    ["REPOSITORY_HOMEPAGE_MISMATCH"],
+                    [finding.code for finding in findings],
+                )
+
     def test_repository_homepage_reports_missing_wrong_and_failed_lookups(self) -> None:
         site = SiteConfig(
             name="Example",
@@ -169,6 +187,33 @@ class SeoFleetAuditTests(unittest.TestCase):
             [audit], seo_fleet_audit.fetch_repository_homepage
         )
         self.assertEqual(2, status)
+
+    def test_main_preserves_repository_homepage_drift_as_defect_status(self) -> None:
+        site = SiteConfig(
+            name="Example",
+            origin="https://www.example.com",
+            repository="Example/site",
+        )
+        audit = seo_fleet_audit.SiteAudit(site)
+
+        with (
+            patch.object(seo_fleet_audit, "_load_sites", return_value=[site]),
+            patch.object(seo_fleet_audit, "audit_site", return_value=audit),
+            patch.object(
+                seo_fleet_audit,
+                "fetch_repository_homepage",
+                return_value="https://preview.example.com",
+            ),
+            patch.object(seo_fleet_audit, "render_markdown", return_value="receipt\n"),
+            redirect_stdout(StringIO()),
+        ):
+            status = seo_fleet_audit.main(["--config", "unused.json"])
+
+        self.assertEqual(1, status)
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_MISMATCH"],
+            [finding.code for finding in audit.findings],
+        )
 
     def test_healthy_site_checks_root_robots_sitemap_and_every_loc(self) -> None:
         origin = "https://example.com"

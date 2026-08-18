@@ -305,7 +305,8 @@ def audit_repository_homepage(
                 "empty homepage",
             )
         ]
-    if not urls_equivalent(homepage, site.origin):
+    accepted_homepages = {site.origin, f"{site.origin}/"}
+    if homepage not in accepted_homepages:
         return [
             Finding(
                 "REPOSITORY_HOMEPAGE_MISMATCH",
