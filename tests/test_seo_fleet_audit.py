@@ -1,5 +1,9 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import unittest
+from unittest.mock import Mock, patch
 
+import tools.seo_fleet_audit as seo_fleet_audit
 from tools.seo_fleet_audit import (
     FetchReceipt,
     SiteConfig,
@@ -20,6 +24,197 @@ class FakeFetcher:
 
 
 class SeoFleetAuditTests(unittest.TestCase):
+    def test_repository_homepage_accepts_exact_origin_and_trailing_slash(self) -> None:
+        site = SiteConfig(
+            name="Example",
+            origin="https://www.example.com",
+            repository="Example/site",
+        )
+
+        for homepage in (
+            "https://www.example.com",
+            "https://www.example.com/",
+        ):
+            with self.subTest(homepage=homepage):
+                findings = seo_fleet_audit.audit_repository_homepage(
+                    site, lambda _repository: homepage
+                )
+                self.assertEqual([], findings)
+
+        for homepage in (
+            "http://www.example.com",
+            "https://example.com",
+            "https://WWW.example.com",
+            "https://www.example.com/pricing",
+            "https://www.example.com?preview=1",
+            "https://www.example.com#preview",
+            "https://www.example.com////",
+        ):
+            with self.subTest(homepage=homepage):
+                findings = seo_fleet_audit.audit_repository_homepage(
+                    site, lambda _repository: homepage
+                )
+                self.assertEqual(
+                    ["REPOSITORY_HOMEPAGE_MISMATCH"],
+                    [finding.code for finding in findings],
+                )
+
+    def test_repository_homepage_reports_missing_wrong_and_failed_lookups(self) -> None:
+        site = SiteConfig(
+            name="Example",
+            origin="https://www.example.com",
+            repository="Example/site",
+        )
+
+        missing = seo_fleet_audit.audit_repository_homepage(
+            site, lambda _repository: ""
+        )
+        wrong = seo_fleet_audit.audit_repository_homepage(
+            site, lambda _repository: "https://example-site.vercel.app"
+        )
+
+        def fail(_repository: str) -> str:
+            raise RuntimeError("GitHub API unavailable")
+
+        failed = seo_fleet_audit.audit_repository_homepage(site, fail)
+
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_MISSING"], [item.code for item in missing]
+        )
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_MISMATCH"], [item.code for item in wrong]
+        )
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_LOOKUP_FAILED"], [item.code for item in failed]
+        )
+        self.assertEqual("https://www.example.com", wrong[0].expected)
+        self.assertEqual("https://example-site.vercel.app", wrong[0].observed)
+
+    def test_repository_homepage_checks_join_findings_and_flag_lookup_failures(
+        self,
+    ) -> None:
+        audits = [
+            seo_fleet_audit.SiteAudit(
+                SiteConfig(
+                    name="Healthy",
+                    origin="https://healthy.example.com",
+                    repository="Example/healthy",
+                )
+            ),
+            seo_fleet_audit.SiteAudit(
+                SiteConfig(
+                    name="Drifted",
+                    origin="https://drifted.example.com",
+                    repository="Example/drifted",
+                )
+            ),
+            seo_fleet_audit.SiteAudit(
+                SiteConfig(
+                    name="Unavailable",
+                    origin="https://unavailable.example.com",
+                    repository="Example/unavailable",
+                )
+            ),
+        ]
+
+        def fetch(repository: str) -> str:
+            if repository == "Example/healthy":
+                return "https://healthy.example.com/"
+            if repository == "Example/drifted":
+                return "https://preview.example.com"
+            raise RuntimeError("rate limited")
+
+        operational_failure = seo_fleet_audit.audit_repository_homepages(audits, fetch)
+
+        self.assertTrue(operational_failure)
+        self.assertEqual([], audits[0].findings)
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_MISMATCH"],
+            [finding.code for finding in audits[1].findings],
+        )
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_LOOKUP_FAILED"],
+            [finding.code for finding in audits[2].findings],
+        )
+
+    def test_repository_homepage_lookup_uses_authenticated_gh_cli(self) -> None:
+        response = Mock(stdout='{"homepage":"https://www.example.com"}\n')
+
+        with (
+            patch("subprocess.run", return_value=response) as run,
+            patch.object(
+                seo_fleet_audit,
+                "build_opener",
+                side_effect=AssertionError("direct unauthenticated API call"),
+            ),
+            patch("shutil.which", return_value="/authenticated/gh"),
+        ):
+            homepage = seo_fleet_audit.fetch_repository_homepage("Example/site")
+
+        self.assertEqual("https://www.example.com", homepage)
+        run.assert_called_once_with(
+            ["/authenticated/gh", "api", "repos/Example/site"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10.0,
+        )
+
+    def test_main_runs_repository_homepage_canary_and_preserves_operational_failure(
+        self,
+    ) -> None:
+        site = SiteConfig(
+            name="Example",
+            origin="https://www.example.com",
+            repository="Example/site",
+        )
+        audit = seo_fleet_audit.SiteAudit(site)
+
+        with (
+            patch.object(seo_fleet_audit, "_load_sites", return_value=[site]),
+            patch.object(seo_fleet_audit, "audit_site", return_value=audit),
+            patch.object(
+                seo_fleet_audit,
+                "audit_repository_homepages",
+                return_value=True,
+            ) as homepage_canary,
+            patch.object(seo_fleet_audit, "render_markdown", return_value="receipt\n"),
+            redirect_stdout(StringIO()),
+        ):
+            status = seo_fleet_audit.main(["--config", "unused.json"])
+
+        homepage_canary.assert_called_once_with(
+            [audit], seo_fleet_audit.fetch_repository_homepage
+        )
+        self.assertEqual(2, status)
+
+    def test_main_preserves_repository_homepage_drift_as_defect_status(self) -> None:
+        site = SiteConfig(
+            name="Example",
+            origin="https://www.example.com",
+            repository="Example/site",
+        )
+        audit = seo_fleet_audit.SiteAudit(site)
+
+        with (
+            patch.object(seo_fleet_audit, "_load_sites", return_value=[site]),
+            patch.object(seo_fleet_audit, "audit_site", return_value=audit),
+            patch.object(
+                seo_fleet_audit,
+                "fetch_repository_homepage",
+                return_value="https://preview.example.com",
+            ),
+            patch.object(seo_fleet_audit, "render_markdown", return_value="receipt\n"),
+            redirect_stdout(StringIO()),
+        ):
+            status = seo_fleet_audit.main(["--config", "unused.json"])
+
+        self.assertEqual(1, status)
+        self.assertEqual(
+            ["REPOSITORY_HOMEPAGE_MISMATCH"],
+            [finding.code for finding in audit.findings],
+        )
+
     def test_healthy_site_checks_root_robots_sitemap_and_every_loc(self) -> None:
         origin = "https://example.com"
         fetch = FakeFetcher(
@@ -311,6 +506,21 @@ class SeoFleetAuditTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 with self.assertRaises(ValueError):
                     SiteConfig(name="Unsafe", origin=origin)
+
+    def test_site_contract_rejects_invalid_repository_identifiers(self) -> None:
+        for repository in (
+            "QuantAlchemy",
+            "/qa-website",
+            "QuantAlchemy/qa-website/extra",
+            "QuantAlchemy/qa-website?tab=readme",
+        ):
+            with self.subTest(repository=repository):
+                with self.assertRaises(ValueError):
+                    SiteConfig(
+                        name="Unsafe",
+                        origin="https://example.com",
+                        repository=repository,
+                    )
 
     def test_site_contract_rejects_non_path_expectations(self) -> None:
         for field, value in [

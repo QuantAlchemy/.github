@@ -7,7 +7,9 @@ import argparse
 import ipaddress
 import json
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -58,6 +60,13 @@ class SiteConfig:
                 f"{self.name}: origin must be an HTTPS origin without a path: {self.origin}"
             )
         object.__setattr__(self, "origin", origin)
+        if self.repository and not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository
+        ):
+            raise ValueError(
+                f"{self.name}: repository must use the GitHub owner/name format: "
+                f"{self.repository}"
+            )
         for field_name in ("expected_text_paths", "required_canonical_paths"):
             paths = tuple(dict.fromkeys(getattr(self, field_name)))
             for path in paths:
@@ -266,6 +275,93 @@ def _normalized_url(url: str) -> tuple[str, str, str, str]:
 
 def urls_equivalent(left: str, right: str) -> bool:
     return _normalized_url(left) == _normalized_url(right)
+
+
+def audit_repository_homepage(
+    site: SiteConfig,
+    homepage_fetcher: Callable[[str], str],
+) -> list[Finding]:
+    """Compare a repository's GitHub homepage with its canonical production origin."""
+    if not site.repository:
+        return []
+    repository_url = f"https://github.com/{site.repository}"
+    try:
+        homepage = homepage_fetcher(site.repository).strip()
+    except Exception as exc:
+        return [
+            Finding(
+                "REPOSITORY_HOMEPAGE_LOOKUP_FAILED",
+                repository_url,
+                site.origin,
+                f"{type(exc).__name__}: {exc}",
+            )
+        ]
+    if not homepage:
+        return [
+            Finding(
+                "REPOSITORY_HOMEPAGE_MISSING",
+                repository_url,
+                site.origin,
+                "empty homepage",
+            )
+        ]
+    accepted_homepages = {site.origin, f"{site.origin}/"}
+    if homepage not in accepted_homepages:
+        return [
+            Finding(
+                "REPOSITORY_HOMEPAGE_MISMATCH",
+                repository_url,
+                site.origin,
+                homepage,
+            )
+        ]
+    return []
+
+
+def audit_repository_homepages(
+    audits: Iterable[SiteAudit],
+    homepage_fetcher: Callable[[str], str],
+) -> bool:
+    """Attach repository homepage findings and report lookup infrastructure failure."""
+    lookup_failed = False
+    for audit in audits:
+        findings = audit_repository_homepage(audit.site, homepage_fetcher)
+        audit.findings.extend(findings)
+        lookup_failed = lookup_failed or any(
+            finding.code == "REPOSITORY_HOMEPAGE_LOOKUP_FAILED" for finding in findings
+        )
+    return lookup_failed
+
+
+def fetch_repository_homepage(repository: str) -> str:
+    """Read a repository homepage through the authenticated GitHub CLI."""
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise ValueError(f"invalid GitHub repository: {repository}")
+    gh = shutil.which("gh")
+    if not gh:
+        raise RuntimeError("authenticated gh CLI is unavailable")
+    try:
+        response = subprocess.run(
+            [gh, "api", f"repos/{repository}"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10.0,
+        )
+        if len(response.stdout.encode("utf-8")) > MAX_BODY_BYTES:
+            raise ValueError(f"GitHub response exceeded {MAX_BODY_BYTES} bytes")
+        payload = json.loads(response.stdout)
+    except Exception as exc:
+        raise RuntimeError(
+            f"GitHub repository lookup failed for {repository}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"GitHub repository lookup returned invalid data for {repository}"
+        )
+    homepage = payload.get("homepage")
+    return homepage if isinstance(homepage, str) else ""
 
 
 def _host(url: str) -> str:
@@ -661,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
         audit_site(site, max_workers=args.max_workers)
         for site in _load_sites(args.config)
     ]
+    homepage_lookup_failed = audit_repository_homepages(
+        audits, fetch_repository_homepage
+    )
     markdown = render_markdown(audits)
     print(markdown, end="")
 
@@ -673,6 +772,8 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(_json_payload(audits), indent=2) + "\n", encoding="utf-8"
         )
 
+    if homepage_lookup_failed:
+        return 2
     return 0 if all(audit.healthy for audit in audits) else 1
 
 
