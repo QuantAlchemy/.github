@@ -16,10 +16,27 @@ For every site in `config/public-sites.json`, the crawler verifies:
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
+## Repository homepage owner action
+
+Repository homepage settings require repository administration permission. Preview the exact settings that differ from the canonical fleet map:
+
+```bash
+python3 tools/update_repo_homepages.py
+```
+
+Apply and verify only the reported differences with an authenticated owner credential:
+
+```bash
+gh auth status
+python3 tools/update_repo_homepages.py --apply
+```
+
+The default mode is read-only and prints copyable `gh api` commands. Apply mode checks the homepage returned by every GitHub update and stops if GitHub does not persist the canonical value.
+
 ## Local verification
 
 ```bash
-python3 -m unittest tests/test_seo_fleet_audit.py -v
+python3 -m unittest tests/test_seo_fleet_audit.py tests/test_update_repo_homepages.py -v
 python3 tools/seo_fleet_audit.py \
   --config config/public-sites.json \
   --markdown-out /tmp/weekly-seo-fleet-audit.md \
