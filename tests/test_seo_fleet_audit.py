@@ -1,12 +1,17 @@
 from contextlib import redirect_stdout
+from email.message import Message
 from io import StringIO
+import json
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
 import tools.seo_fleet_audit as seo_fleet_audit
 from tools.seo_fleet_audit import (
     FetchReceipt,
+    SiteAudit,
     SiteConfig,
+    _check_http_receipt,
     audit_site,
     is_safe_public_https_url,
     render_markdown,
@@ -24,6 +29,128 @@ class FakeFetcher:
 
 
 class SeoFleetAuditTests(unittest.TestCase):
+    def test_response_decoder_rejects_invalid_or_unknown_encodings(self) -> None:
+        self.assertEqual(
+            ("{\"ok\":true}", ""),
+            seo_fleet_audit._decode_response_body(b'{"ok":true}', "utf-8"),
+        )
+        for body, charset in [
+            (b'{"value":"\xff"}', "utf-8"),
+            (b"{}", "not-a-real-charset"),
+        ]:
+            with self.subTest(charset=charset):
+                decoded, error = seo_fleet_audit._decode_response_body(body, charset)
+                self.assertEqual("", decoded)
+                self.assertIn("decode failed", error)
+
+    def test_fetch_url_preserves_decode_failure_as_a_receipt_error(self) -> None:
+        headers = Message()
+        headers["Content-Type"] = "application/json; charset=utf-8"
+        response = Mock()
+        response.getcode.return_value = 200
+        response.headers = headers
+        response.read.return_value = b'{"value":"\xff"}'
+        opener = Mock()
+        opener.open.return_value = response
+
+        with (
+            patch.object(seo_fleet_audit, "build_opener", return_value=opener),
+            patch.object(seo_fleet_audit, "is_safe_public_https_url", return_value=True),
+        ):
+            receipt = seo_fleet_audit.fetch_url("https://example.com/data.json")
+
+        self.assertEqual("", receipt.body)
+        self.assertIn("decode failed", receipt.error)
+
+    def test_expected_json_stops_content_checks_after_a_receipt_error(self) -> None:
+        origin = "https://example.com"
+        error_url = f"{origin}/error.json"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(f"{origin}/", 200, f"{origin}/", "text/html", ""),
+                error_url: FetchReceipt(
+                    error_url,
+                    200,
+                    error_url,
+                    "application/json",
+                    "",
+                    error="body decode failed (utf-8)",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    f"{origin}/robots.txt", 200, f"{origin}/robots.txt", "text/plain", ""
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    f"{origin}/sitemap.xml",
+                    200,
+                    f"{origin}/sitemap.xml",
+                    "application/xml",
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"/>',
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                expected_json_paths=("/error.json",),
+            ),
+            fetch,
+        )
+
+        self.assertEqual(
+            ["EXPECTED_JSON_FETCH_ERROR"],
+            [
+                finding.code
+                for finding in audit.findings
+                if finding.code.startswith("EXPECTED_JSON")
+            ],
+        )
+
+    def test_strict_json_parser_preserves_large_exponents(self) -> None:
+        payload = seo_fleet_audit._parse_strict_json('{"value":1e400}')
+        self.assertEqual("1E+400", str(payload["value"]))
+
+    def test_http_contract_rejects_equivalent_trailing_slash_redirects(self) -> None:
+        origin = "https://example.com"
+        audit = SiteAudit(SiteConfig(name="Example", origin=origin))
+        receipt = FetchReceipt(
+            requested_url=f"{origin}/llms.txt",
+            status=200,
+            final_url=f"{origin}/llms.txt/",
+            content_type="text/plain",
+            body="# Example",
+            redirects=(f"{origin}/llms.txt/",),
+        )
+
+        _check_http_receipt(
+            audit,
+            receipt,
+            "EXPECTED_TEXT",
+            f"{origin}/llms.txt",
+        )
+
+        self.assertEqual(
+            ["EXPECTED_TEXT_FINAL_URL"],
+            [finding.code for finding in audit.findings],
+        )
+
+    def test_public_sites_config_contains_netly_canary_contract(self) -> None:
+        payload = json.loads(Path("config/public-sites.json").read_text(encoding="utf-8"))
+        netly = next(site for site in payload["sites"] if site["name"] == "Netly")
+
+        self.assertEqual(
+            {
+                "name": "Netly",
+                "origin": "https://netly.labs.quantalchemy.io",
+                "repository": "QuantAlchemy/netly",
+                "expected_text_paths": ["/llms.txt", "/ai.txt"],
+                "expected_json_paths": ["/claim-receipts.json"],
+                "required_canonical_paths": ["/", "/waitlist", "/terms", "/privacy"],
+            },
+            netly,
+        )
+
     def test_repository_homepage_accepts_exact_origin_and_trailing_slash(self) -> None:
         site = SiteConfig(
             name="Example",
@@ -341,6 +468,240 @@ class SeoFleetAuditTests(unittest.TestCase):
         for path in ("/", "/progress", "/llms.txt", "/ai.txt"):
             self.assertIn(f"`{origin}{path}`", report)
 
+    def test_site_contract_accepts_expected_json_paths(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Example</title></html>",
+                ),
+                f"{origin}/claim-receipts.json": FetchReceipt(
+                    requested_url=f"{origin}/claim-receipts.json",
+                    status=200,
+                    final_url=f"{origin}/claim-receipts.json",
+                    content_type="application/json; charset=utf-8",
+                    body='{"claims": []}',
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"Sitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                expected_json_paths=("/claim-receipts.json",),
+            ),
+            fetch,
+        )
+
+        self.assertEqual([], audit.findings)
+        self.assertEqual(4, audit.checked_urls)
+
+    def test_site_contract_reports_expected_json_content_and_parse_defects(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Example</title></html>",
+                ),
+                f"{origin}/wrong-type.json": FetchReceipt(
+                    requested_url=f"{origin}/wrong-type.json",
+                    status=200,
+                    final_url=f"{origin}/wrong-type.json",
+                    content_type="text/plain",
+                    body='{"claims": []}',
+                ),
+                f"{origin}/malformed.json": FetchReceipt(
+                    requested_url=f"{origin}/malformed.json",
+                    status=200,
+                    final_url=f"{origin}/malformed.json",
+                    content_type="application/json",
+                    body="not json",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"Sitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                expected_json_paths=("/wrong-type.json", "/malformed.json"),
+            ),
+            fetch,
+        )
+
+        self.assertEqual(
+            {
+                ("EXPECTED_JSON_CONTENT_TYPE", f"{origin}/wrong-type.json"),
+                ("EXPECTED_JSON_INVALID", f"{origin}/malformed.json"),
+            },
+            {(finding.code, finding.url) for finding in audit.findings},
+        )
+
+    def test_expected_json_contract_rejects_redirect_jsonp_and_nan(self) -> None:
+        origin = "https://example.com"
+        redirect_url = f"{origin}/redirected.json"
+        jsonp_url = f"{origin}/jsonp.json"
+        nan_url = f"{origin}/nan.json"
+        infinity_url = f"{origin}/infinity.json"
+        negative_infinity_url = f"{origin}/negative-infinity.json"
+        deep_url = f"{origin}/deep.json"
+        overlong_exponent_url = f"{origin}/overlong-exponent.json"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Example</title></html>",
+                ),
+                redirect_url: FetchReceipt(
+                    requested_url=redirect_url,
+                    status=200,
+                    final_url=f"{redirect_url}/",
+                    content_type="application/json",
+                    body="{}",
+                    redirects=(f"{redirect_url}/",),
+                ),
+                jsonp_url: FetchReceipt(
+                    requested_url=jsonp_url,
+                    status=200,
+                    final_url=jsonp_url,
+                    content_type="application/jsonp",
+                    body="{not-json",
+                ),
+                nan_url: FetchReceipt(
+                    requested_url=nan_url,
+                    status=200,
+                    final_url=nan_url,
+                    content_type="application/json",
+                    body='{"value": NaN}',
+                ),
+                infinity_url: FetchReceipt(
+                    requested_url=infinity_url,
+                    status=200,
+                    final_url=infinity_url,
+                    content_type="application/json",
+                    body='{"value": Infinity}',
+                ),
+                negative_infinity_url: FetchReceipt(
+                    requested_url=negative_infinity_url,
+                    status=200,
+                    final_url=negative_infinity_url,
+                    content_type="application/json",
+                    body='{"value": -Infinity}',
+                ),
+                deep_url: FetchReceipt(
+                    requested_url=deep_url,
+                    status=200,
+                    final_url=deep_url,
+                    content_type="application/json",
+                    body="[" * 100_000 + "]" * 100_000,
+                ),
+                overlong_exponent_url: FetchReceipt(
+                    requested_url=overlong_exponent_url,
+                    status=200,
+                    final_url=overlong_exponent_url,
+                    content_type="application/json",
+                    body='{"value": 1e' + "9" * 1_000 + "}",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"Sitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                expected_json_paths=(
+                    "/redirected.json",
+                    "/jsonp.json",
+                    "/nan.json",
+                    "/infinity.json",
+                    "/negative-infinity.json",
+                    "/deep.json",
+                    "/overlong-exponent.json",
+                ),
+            ),
+            fetch,
+        )
+
+        self.assertEqual(
+            {
+                ("EXPECTED_JSON_REDIRECT", redirect_url),
+                ("EXPECTED_JSON_CONTENT_TYPE", jsonp_url),
+                ("EXPECTED_JSON_INVALID", jsonp_url),
+                ("EXPECTED_JSON_INVALID", nan_url),
+                ("EXPECTED_JSON_INVALID", infinity_url),
+                ("EXPECTED_JSON_INVALID", negative_infinity_url),
+                ("EXPECTED_JSON_INVALID", deep_url),
+                ("EXPECTED_JSON_INVALID", overlong_exponent_url),
+            },
+            {(finding.code, finding.url) for finding in audit.findings},
+        )
+
     def test_site_contract_accepts_expected_text_and_canonical_paths(self) -> None:
         origin = "https://example.com"
         fetch = FakeFetcher(
@@ -526,6 +887,12 @@ class SeoFleetAuditTests(unittest.TestCase):
         for field, value in [
             ("expected_text_paths", "https://foreign.example/llms.txt"),
             ("expected_text_paths", "llms.txt"),
+            ("expected_json_paths", "https://foreign.example/claim-receipts.json"),
+            ("expected_json_paths", "claim-receipts.json"),
+            ("expected_json_paths", "/../admin"),
+            ("expected_json_paths", "/a/../../admin"),
+            ("expected_json_paths", "/\\foreign.example/x"),
+            ("expected_json_paths", "/%2f%2fforeign.example/x"),
             ("required_canonical_paths", "/progress?preview=1"),
             ("required_canonical_paths", "//foreign.example/progress"),
         ]:
