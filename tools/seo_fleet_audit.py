@@ -15,13 +15,14 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
 from typing import Callable, Iterable
 from urllib.error import HTTPError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 USER_AGENT = "QuantAlchemy-SEOFleetAudit/1.0"
@@ -35,7 +36,9 @@ class SiteConfig:
     origin: str
     repository: str = ""
     expected_text_paths: tuple[str, ...] = ()
+    expected_json_paths: tuple[str, ...] = ()
     required_canonical_paths: tuple[str, ...] = ()
+    required_noindex_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         origin = self.origin.rstrip("/")
@@ -67,13 +70,24 @@ class SiteConfig:
                 f"{self.name}: repository must use the GitHub owner/name format: "
                 f"{self.repository}"
             )
-        for field_name in ("expected_text_paths", "required_canonical_paths"):
+        for field_name in (
+            "expected_text_paths",
+            "expected_json_paths",
+            "required_canonical_paths",
+            "required_noindex_paths",
+        ):
             paths = tuple(dict.fromkeys(getattr(self, field_name)))
             for path in paths:
                 parsed_path = urlsplit(path)
+                decoded_path = unquote(path)
+                decoded_segments = decoded_path.split("/")
                 if (
                     not path.startswith("/")
                     or path.startswith("//")
+                    or decoded_path.startswith("//")
+                    or "\\" in decoded_path
+                    or any(ord(character) < 32 for character in decoded_path)
+                    or any(segment in {".", ".."} for segment in decoded_segments)
                     or parsed_path.scheme
                     or parsed_path.netloc
                     or parsed_path.query
@@ -86,6 +100,18 @@ class SiteConfig:
             object.__setattr__(self, field_name, paths)
 
 
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _parse_strict_json(body: str) -> object:
+    return json.loads(
+        body,
+        parse_constant=_reject_nonstandard_json_constant,
+        parse_float=Decimal,
+    )
+
+
 @dataclass(frozen=True)
 class FetchReceipt:
     requested_url: str
@@ -95,6 +121,7 @@ class FetchReceipt:
     body: str
     redirects: tuple[str, ...] = ()
     error: str = ""
+    robots_header: str = ""
 
 
 @dataclass(frozen=True)
@@ -166,6 +193,13 @@ def is_safe_public_https_url(
         return False
 
 
+def _decode_response_body(raw_body: bytes, charset: str) -> tuple[str, str]:
+    try:
+        return raw_body.decode(charset), ""
+    except (LookupError, UnicodeDecodeError) as exc:
+        return "", f"body decode failed ({charset}): {type(exc).__name__}: {exc}"
+
+
 def fetch_url(url: str, timeout: float = 20.0, max_redirects: int = 5) -> FetchReceipt:
     """Fetch a URL while preserving every redirect as an evidence receipt."""
     opener = build_opener(_NoRedirect)
@@ -235,13 +269,16 @@ def fetch_url(url: str, timeout: float = 20.0, max_redirects: int = 5) -> FetchR
                 error=f"response exceeded {MAX_BODY_BYTES} bytes",
             )
         charset = response.headers.get_content_charset() or "utf-8"
+        body, decode_error = _decode_response_body(raw_body, charset)
         return FetchReceipt(
             requested_url=requested_url,
             status=status,
             final_url=current_url,
             content_type=response.headers.get("Content-Type", ""),
-            body=raw_body.decode(charset, errors="replace"),
+            body=body,
             redirects=tuple(redirects),
+            error=decode_error,
+            robots_header=response.headers.get("X-Robots-Tag", ""),
         )
 
     raise AssertionError("unreachable")
@@ -267,6 +304,36 @@ def extract_canonicals(html: str) -> list[str]:
     return parser.canonicals
 
 
+class _RobotsMetaParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.directives: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "meta":
+            return
+        values = {key.lower(): value or "" for key, value in attrs}
+        if values.get("name", "").strip().lower() == "robots":
+            self.directives.append(values.get("content", ""))
+
+
+def extract_robots_directives(html: str) -> list[str]:
+    parser = _RobotsMetaParser()
+    parser.feed(html)
+    return parser.directives
+
+
+def _robots_tokens(value: str) -> set[str]:
+    """Directive tokens in a robots value, dropping any `googlebot:` style prefix."""
+    return {part.rpartition(":")[2].strip().lower() for part in value.split(",")}
+
+
+def declares_noindex(receipt: FetchReceipt) -> bool:
+    """Whether the page tells crawlers not to index it, by meta tag or header."""
+    sources = (*extract_robots_directives(receipt.body), receipt.robots_header)
+    return any("noindex" in _robots_tokens(source) for source in sources)
+
+
 def _normalized_url(url: str) -> tuple[str, str, str, str]:
     parsed = urlsplit(url)
     path = parsed.path.rstrip("/") or "/"
@@ -275,6 +342,56 @@ def _normalized_url(url: str) -> tuple[str, str, str, str]:
 
 def urls_equivalent(left: str, right: str) -> bool:
     return _normalized_url(left) == _normalized_url(right)
+
+
+def _wildcard_rules(robots_body: str) -> list[tuple[str, bool]]:
+    """`User-agent: *` rules as (path pattern, allowed), in file order."""
+    rules: list[tuple[str, bool]] = []
+    in_wildcard_group = False
+    previous_was_agent = False
+    for raw_line in robots_body.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        field_name, separator, value = line.partition(":")
+        if not separator:
+            continue
+        field_name = field_name.strip().lower()
+        value = value.strip()
+        if field_name == "user-agent":
+            # Consecutive User-agent lines share one group; any other line ends it.
+            if not previous_was_agent:
+                in_wildcard_group = False
+            in_wildcard_group = in_wildcard_group or value == "*"
+            previous_was_agent = True
+            continue
+        previous_was_agent = False
+        if in_wildcard_group and value and field_name in {"allow", "disallow"}:
+            rules.append((value, field_name == "allow"))
+    return rules
+
+
+def _rule_match_length(pattern: str, path: str) -> int:
+    """Length of a robots.txt pattern matching `path`, or -1 when it does not."""
+    regex = "".join(
+        ".*" if character == "*" else "$" if character == "$" else re.escape(character)
+        for character in pattern
+    )
+    return len(pattern) if re.match(regex, path) else -1
+
+
+def path_blocked_by_robots(robots_body: str, path: str) -> bool:
+    """Whether `User-agent: *` may not crawl `path`.
+
+    Longest matching rule wins and Allow breaks a tie, which is the rule Google
+    and Bing both document.
+    """
+    best_length, best_allowed = -1, True
+    for pattern, allowed in _wildcard_rules(robots_body):
+        length = _rule_match_length(pattern, path)
+        if length < 0:
+            continue
+        if length > best_length or (length == best_length and allowed):
+            best_length, best_allowed = length, allowed
+    return best_length >= 0 and not best_allowed
 
 
 def audit_repository_homepage(
@@ -449,6 +566,31 @@ def audit_site(
                 text_receipt.content_type or "missing Content-Type",
             )
 
+    for path in site.expected_json_paths:
+        expected_url = f"{site.origin}{path}"
+        json_receipt = fetch(expected_url)
+        _check_http_receipt(audit, json_receipt, "EXPECTED_JSON", expected_url)
+        if json_receipt.status == 200 and not json_receipt.error:
+            media_type = json_receipt.content_type.partition(";")[0].strip().lower()
+            if media_type != "application/json":
+                _finding(
+                    audit,
+                    "EXPECTED_JSON_CONTENT_TYPE",
+                    expected_url,
+                    "application/json",
+                    json_receipt.content_type or "missing Content-Type",
+                )
+            try:
+                _parse_strict_json(json_receipt.body)
+            except (ValueError, RecursionError, InvalidOperation) as exc:
+                _finding(
+                    audit,
+                    "EXPECTED_JSON_INVALID",
+                    expected_url,
+                    "parseable RFC 8259 JSON",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
     for path in site.required_canonical_paths:
         expected_url = f"{site.origin}{path}"
         page = fetch(expected_url)
@@ -482,6 +624,46 @@ def audit_site(
             "text/plain",
             robots.content_type or "missing Content-Type",
         )
+
+    for path in site.required_noindex_paths:
+        expected_url = f"{site.origin}{path}"
+        page = fetch(expected_url)
+        _check_http_receipt(audit, page, "REQUIRED_NOINDEX", expected_url)
+        if page.status != 200 or page.error:
+            continue
+        if not _is_html(page):
+            _finding(
+                audit,
+                "REQUIRED_NOINDEX_CONTENT_TYPE",
+                expected_url,
+                "text/html",
+                page.content_type or "missing Content-Type",
+            )
+            continue
+        if not declares_noindex(page):
+            observed = ", ".join(
+                directive
+                for directive in (
+                    *extract_robots_directives(page.body),
+                    page.robots_header,
+                )
+                if directive
+            )
+            _finding(
+                audit,
+                "REQUIRED_NOINDEX_MISSING",
+                expected_url,
+                "a robots noindex directive",
+                observed or "no robots directive",
+            )
+        if robots.status == 200 and path_blocked_by_robots(robots.body, path):
+            _finding(
+                audit,
+                "REQUIRED_NOINDEX_UNREACHABLE",
+                expected_url,
+                "a crawlable page, so the noindex is read",
+                f"{robots_url} disallows it for User-agent: *",
+            )
 
     expected_sitemap = f"{site.origin}/sitemap.xml"
     sitemap_refs = re.findall(
@@ -529,7 +711,30 @@ def _check_http_receipt(
         if receipt.error:
             observed += f" ({receipt.error})"
         _finding(audit, f"{prefix}_HTTP_STATUS", expected_url, "HTTP 200", observed)
-    if not urls_equivalent(receipt.final_url, expected_url):
+    elif receipt.error:
+        _finding(
+            audit,
+            f"{prefix}_FETCH_ERROR",
+            receipt.requested_url,
+            "a readable HTTP 200 response",
+            receipt.error,
+        )
+    if receipt.redirects:
+        chain = " -> ".join((receipt.requested_url, *receipt.redirects))
+        if prefix == "LOC":
+            redirect_code = "LOC_REDIRECT"
+        elif prefix == "EXPECTED_JSON":
+            redirect_code = "EXPECTED_JSON_REDIRECT"
+        else:
+            redirect_code = f"{prefix}_FINAL_URL"
+        _finding(
+            audit,
+            redirect_code,
+            receipt.requested_url,
+            f"direct HTTP 200 at {expected_url}",
+            f"HTTP {receipt.status} -> `{receipt.final_url}`; chain: {chain}",
+        )
+    elif not urls_equivalent(receipt.final_url, expected_url):
         chain = " -> ".join((receipt.requested_url, *receipt.redirects))
         _finding(
             audit,

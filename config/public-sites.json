@@ -42,6 +42,38 @@
       "name": "ClickAlchemy",
       "origin": "https://www.clickalchemy.ai",
       "repository": "QuantAlchemy/clickalchemy"
+    },
+    {
+      "name": "Netly",
+      "origin": "https://netly.labs.quantalchemy.io",
+      "repository": "QuantAlchemy/netly",
+      "expected_text_paths": [
+        "/llms.txt",
+        "/ai.txt"
+      ],
+      "expected_json_paths": [
+        "/claim-receipts.json"
+      ],
+      "required_canonical_paths": [
+        "/",
+        "/waitlist",
+        "/terms",
+        "/privacy"
+      ],
+      "required_noindex_paths": [
+        "/budget",
+        "/categories",
+        "/categories/train",
+        "/flags",
+        "/freedom",
+        "/import",
+        "/insights",
+        "/notifications",
+        "/oauth-return",
+        "/settings",
+        "/subscriptions",
+        "/transactions"
+      ]
     }
   ]
 }
