@@ -59,6 +59,20 @@
         "/waitlist",
         "/terms",
         "/privacy"
+      ],
+      "required_noindex_paths": [
+        "/budget",
+        "/categories",
+        "/categories/train",
+        "/flags",
+        "/freedom",
+        "/import",
+        "/insights",
+        "/notifications",
+        "/oauth-return",
+        "/settings",
+        "/subscriptions",
+        "/transactions"
       ]
     }
   ]

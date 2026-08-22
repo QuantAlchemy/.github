@@ -147,6 +147,20 @@ class SeoFleetAuditTests(unittest.TestCase):
                 "expected_text_paths": ["/llms.txt", "/ai.txt"],
                 "expected_json_paths": ["/claim-receipts.json"],
                 "required_canonical_paths": ["/", "/waitlist", "/terms", "/privacy"],
+                "required_noindex_paths": [
+                    "/budget",
+                    "/categories",
+                    "/categories/train",
+                    "/flags",
+                    "/freedom",
+                    "/import",
+                    "/insights",
+                    "/notifications",
+                    "/oauth-return",
+                    "/settings",
+                    "/subscriptions",
+                    "/transactions",
+                ],
             },
             netly,
         )
@@ -768,6 +782,183 @@ class SeoFleetAuditTests(unittest.TestCase):
 
         self.assertEqual([], audit.findings)
         self.assertEqual(6, audit.checked_urls)
+
+    def test_site_contract_accepts_required_noindex_paths(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body=f'<link rel="canonical" href="{origin}/">',
+                ),
+                f"{origin}/app": FetchReceipt(
+                    requested_url=f"{origin}/app",
+                    status=200,
+                    final_url=f"{origin}/app",
+                    content_type="text/html",
+                    body='<meta name="ROBOTS" content="NoIndex, nofollow">',
+                ),
+                f"{origin}/inbox": FetchReceipt(
+                    requested_url=f"{origin}/inbox",
+                    status=200,
+                    final_url=f"{origin}/inbox",
+                    content_type="text/html",
+                    body="<p>no meta tag here</p>",
+                    robots_header="googlebot: noindex",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=f"User-agent: *\nAllow: /\n\nSitemap: {origin}/sitemap.xml\n",
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                required_canonical_paths=("/",),
+                required_noindex_paths=("/app", "/inbox"),
+            ),
+            fetch,
+        )
+
+        self.assertEqual([], audit.findings)
+
+    def test_required_noindex_reports_missing_directive_and_blocked_pages(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body=f'<link rel="canonical" href="{origin}/">',
+                ),
+                f"{origin}/indexable": FetchReceipt(
+                    requested_url=f"{origin}/indexable",
+                    status=200,
+                    final_url=f"{origin}/indexable",
+                    content_type="text/html",
+                    body='<meta name="robots" content="index, follow">',
+                ),
+                f"{origin}/blocked": FetchReceipt(
+                    requested_url=f"{origin}/blocked",
+                    status=200,
+                    final_url=f"{origin}/blocked",
+                    content_type="text/html",
+                    body='<meta name="robots" content="noindex">',
+                ),
+                f"{origin}/feed.json": FetchReceipt(
+                    requested_url=f"{origin}/feed.json",
+                    status=200,
+                    final_url=f"{origin}/feed.json",
+                    content_type="application/json",
+                    body="{}",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=(
+                        "User-agent: *\nAllow: /\nDisallow: /blocked\n\n"
+                        f"Sitemap: {origin}/sitemap.xml\n"
+                    ),
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                required_noindex_paths=("/indexable", "/blocked", "/feed.json"),
+            ),
+            fetch,
+        )
+
+        self.assertEqual(
+            [
+                ("REQUIRED_NOINDEX_MISSING", f"{origin}/indexable", "index, follow"),
+                (
+                    "REQUIRED_NOINDEX_UNREACHABLE",
+                    f"{origin}/blocked",
+                    f"{origin}/robots.txt disallows it for User-agent: *",
+                ),
+                (
+                    "REQUIRED_NOINDEX_CONTENT_TYPE",
+                    f"{origin}/feed.json",
+                    "application/json",
+                ),
+            ],
+            [
+                (finding.code, finding.url, finding.observed)
+                for finding in audit.findings
+            ],
+        )
+
+    def test_robots_crawlability_follows_group_scope_and_longest_match(self) -> None:
+        robots = (
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /settings\n"
+            "Disallow: /reports/*.csv$\n"
+            "Allow: /settings/public\n"
+            "\n"
+            "User-agent: GPTBot\n"
+            "Disallow: /freedom\n"
+        )
+        for path, blocked in [
+            ("/budget", False),
+            ("/settings", True),
+            ("/settings/billing", True),
+            ("/settings/public", False),
+            ("/reports/q1.csv", True),
+            ("/reports/q1.csv.html", False),
+            ("/freedom", False),
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    blocked, seo_fleet_audit.path_blocked_by_robots(robots, path)
+                )
+
+    def test_site_contract_rejects_non_path_noindex_expectations(self) -> None:
+        with self.assertRaises(ValueError):
+            SiteConfig(
+                name="Example",
+                origin="https://example.com",
+                required_noindex_paths=("https://example.com/settings",),
+            )
 
     def test_reports_exact_wrong_host_redirect_and_broken_url_receipts(self) -> None:
         origin = "https://example.com"
