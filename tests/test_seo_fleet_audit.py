@@ -153,13 +153,15 @@ class SeoFleetAuditTests(unittest.TestCase):
                     "/categories/train",
                     "/flags",
                     "/freedom",
-                    "/import",
                     "/insights",
+                    "/subscriptions",
+                    "/transactions",
+                ],
+                "required_robots_disallow_paths": [
+                    "/import",
                     "/notifications",
                     "/oauth-return",
                     "/settings",
-                    "/subscriptions",
-                    "/transactions",
                 ],
             },
             netly,
@@ -927,6 +929,123 @@ class SeoFleetAuditTests(unittest.TestCase):
             ],
         )
 
+    def test_site_contract_accepts_required_robots_disallow_paths(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Example</title></html>",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=(
+                        "User-agent: *\n"
+                        "Allow: /\n"
+                        "Disallow: /settings\n\n"
+                        f"Sitemap: {origin}/sitemap.xml\n"
+                    ),
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                required_robots_disallow_paths=("/settings",),
+            ),
+            fetch,
+        )
+
+        self.assertEqual([], audit.findings)
+        self.assertNotIn(f"{origin}/settings", fetch.calls)
+
+    def test_required_robots_disallow_reports_crawlable_private_path(self) -> None:
+        origin = "https://example.com"
+        fetch = FakeFetcher(
+            {
+                f"{origin}/": FetchReceipt(
+                    requested_url=f"{origin}/",
+                    status=200,
+                    final_url=f"{origin}/",
+                    content_type="text/html",
+                    body="<html><title>Example</title></html>",
+                ),
+                f"{origin}/robots.txt": FetchReceipt(
+                    requested_url=f"{origin}/robots.txt",
+                    status=200,
+                    final_url=f"{origin}/robots.txt",
+                    content_type="text/plain",
+                    body=(
+                        "User-agent: *\n"
+                        "Allow: /\n\n"
+                        f"Sitemap: {origin}/sitemap.xml\n"
+                    ),
+                ),
+                f"{origin}/sitemap.xml": FetchReceipt(
+                    requested_url=f"{origin}/sitemap.xml",
+                    status=200,
+                    final_url=f"{origin}/sitemap.xml",
+                    content_type="application/xml",
+                    body=(
+                        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                        f"<url><loc>{origin}/</loc></url>"
+                        "</urlset>"
+                    ),
+                ),
+            }
+        )
+
+        audit = audit_site(
+            SiteConfig(
+                name="Example",
+                origin=origin,
+                required_robots_disallow_paths=("/settings",),
+            ),
+            fetch,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    "REQUIRED_ROBOTS_DISALLOW_MISSING",
+                    f"{origin}/settings",
+                    "crawlable for User-agent: *",
+                )
+            ],
+            [
+                (finding.code, finding.url, finding.observed)
+                for finding in audit.findings
+            ],
+        )
+
+    def test_site_contract_rejects_overlapping_route_exclusion_modes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not overlap"):
+            SiteConfig(
+                name="Example",
+                origin="https://example.com",
+                required_noindex_paths=("/settings",),
+                required_robots_disallow_paths=("/settings",),
+            )
+
     def test_robots_crawlability_follows_group_scope_and_longest_match(self) -> None:
         robots = (
             "User-agent: *\n"
@@ -1086,6 +1205,10 @@ class SeoFleetAuditTests(unittest.TestCase):
             ("expected_json_paths", "/%2f%2fforeign.example/x"),
             ("required_canonical_paths", "/progress?preview=1"),
             ("required_canonical_paths", "//foreign.example/progress"),
+            (
+                "required_robots_disallow_paths",
+                "https://foreign.example/settings",
+            ),
         ]:
             with self.subTest(field=field, value=value):
                 with self.assertRaises(ValueError):
