@@ -39,6 +39,7 @@ class SiteConfig:
     expected_json_paths: tuple[str, ...] = ()
     required_canonical_paths: tuple[str, ...] = ()
     required_noindex_paths: tuple[str, ...] = ()
+    required_robots_disallow_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         origin = self.origin.rstrip("/")
@@ -75,6 +76,7 @@ class SiteConfig:
             "expected_json_paths",
             "required_canonical_paths",
             "required_noindex_paths",
+            "required_robots_disallow_paths",
         ):
             paths = tuple(dict.fromkeys(getattr(self, field_name)))
             for path in paths:
@@ -98,6 +100,15 @@ class SiteConfig:
                         f"without query or fragment: {path}"
                     )
             object.__setattr__(self, field_name, paths)
+        exclusion_overlap = set(self.required_noindex_paths) & set(
+            self.required_robots_disallow_paths
+        )
+        if exclusion_overlap:
+            raise ValueError(
+                f"{self.name}: required_noindex_paths and "
+                "required_robots_disallow_paths must not overlap: "
+                f"{', '.join(sorted(exclusion_overlap))}"
+            )
 
 
 def _reject_nonstandard_json_constant(value: str) -> None:
@@ -624,6 +635,17 @@ def audit_site(
             "text/plain",
             robots.content_type or "missing Content-Type",
         )
+
+    if robots.status == 200 and not robots.error:
+        for path in site.required_robots_disallow_paths:
+            if not path_blocked_by_robots(robots.body, path):
+                _finding(
+                    audit,
+                    "REQUIRED_ROBOTS_DISALLOW_MISSING",
+                    f"{site.origin}{path}",
+                    "a robots.txt Disallow rule for User-agent: *",
+                    "crawlable for User-agent: *",
+                )
 
     for path in site.required_noindex_paths:
         expected_url = f"{site.origin}{path}"

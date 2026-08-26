@@ -66,13 +66,15 @@
         "/categories/train",
         "/flags",
         "/freedom",
-        "/import",
         "/insights",
-        "/notifications",
-        "/oauth-return",
-        "/settings",
         "/subscriptions",
         "/transactions"
+      ],
+      "required_robots_disallow_paths": [
+        "/import",
+        "/notifications",
+        "/oauth-return",
+        "/settings"
       ]
     }
   ]
