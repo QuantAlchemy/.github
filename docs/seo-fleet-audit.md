@@ -50,7 +50,7 @@ Add public production sites to `sites`. Add repository-owned deployments that mu
 }
 ```
 
-Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. Set `expected_homepage` to an explicit HTTPS origin only when the non-production deployment should remain linked. Otherwise, keep it empty so the owner-action tool removes stale public metadata. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
+Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. `expected_homepage` is required and must be a string. Set it to an explicit HTTPS origin only when the non-production deployment should remain linked. Use an explicit empty string only when the owner-action tool should remove stale public metadata. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
 
 Morning Edge and other dynamic inventory jobs must use this audit receipt as the classification source of truth. They must not treat every non-empty GitHub homepage field as a QuantAlchemy production website.
 

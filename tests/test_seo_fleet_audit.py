@@ -1308,8 +1308,27 @@ class SeoFleetAuditTests(unittest.TestCase):
             seo_fleet_audit.RepositoryHomepageConfig(
                 repository="Example/site",
                 classification="production",
+                expected_homepage="",
                 note="Production belongs in the sites list.",
             )
+
+    def test_repository_homepage_requires_an_explicit_string_target(self) -> None:
+        with self.assertRaises(TypeError):
+            seo_fleet_audit.RepositoryHomepageConfig(
+                repository="Example/site",
+                classification="prototype",
+                note="Missing target must not imply a destructive clear.",
+            )
+
+        for homepage in (None, 123, False):
+            with self.subTest(homepage=homepage):
+                with self.assertRaisesRegex(ValueError, "must be a string"):
+                    seo_fleet_audit.RepositoryHomepageConfig(
+                        repository="Example/site",
+                        classification="prototype",
+                        expected_homepage=homepage,  # type: ignore[arg-type]
+                        note="Invalid target must not imply a destructive clear.",
+                    )
 
     def test_repository_homepage_loader_rejects_duplicate_repositories(self) -> None:
         duplicate_configs = [

@@ -135,6 +135,37 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate repository"):
                 update_repo_homepages.load_targets(config)
 
+    def test_load_targets_rejects_missing_or_null_expected_homepage(self) -> None:
+        invalid_policies = [
+            {
+                "repository": "Example/missing",
+                "classification": "prototype",
+                "note": "Missing target.",
+            },
+            {
+                "repository": "Example/null",
+                "classification": "retired",
+                "expected_homepage": None,
+                "note": "Null target.",
+            },
+        ]
+
+        for policy in invalid_policies:
+            with self.subTest(repository=policy["repository"]), TemporaryDirectory() as directory:
+                config = Path(directory) / "sites.json"
+                config.write_text(
+                    json.dumps(
+                        {
+                            "sites": [],
+                            "repository_homepages": [policy],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaises((TypeError, ValueError)):
+                    update_repo_homepages.load_targets(config)
+
     def test_github_api_failure_preserves_actionable_error_text(self) -> None:
         failure = subprocess.CalledProcessError(
             1,

@@ -116,7 +116,7 @@ class SiteConfig:
 class RepositoryHomepageConfig:
     repository: str
     classification: str
-    expected_homepage: str = ""
+    expected_homepage: str
     note: str = ""
 
     def __post_init__(self) -> None:
@@ -131,6 +131,10 @@ class RepositoryHomepageConfig:
             raise ValueError(
                 f"{self.repository}: classification must be one of "
                 f"{', '.join(sorted(NON_PRODUCTION_CLASSIFICATIONS))}"
+            )
+        if not isinstance(self.expected_homepage, str):
+            raise ValueError(
+                f"{self.repository}: expected_homepage must be a string"
             )
         if self.expected_homepage:
             parsed = urlsplit(self.expected_homepage)
@@ -156,7 +160,7 @@ class RepositoryHomepageConfig:
             object.__setattr__(
                 self, "expected_homepage", self.expected_homepage.rstrip("/")
             )
-        if not self.note.strip():
+        if not isinstance(self.note, str) or not self.note.strip():
             raise ValueError(f"{self.repository}: note must explain the classification")
 
 
