@@ -16,6 +16,7 @@ For every site in `config/public-sites.json`, the crawler verifies:
 - configured `required_canonical_paths` return direct HTTP 200 HTML and declare exactly one matching canonical link;
 - configured `required_noindex_paths` return direct HTTP 200 HTML, declare `noindex` through a `robots` meta tag or an `X-Robots-Tag` header, and stay crawlable for `User-agent: *`. A page `robots.txt` disallows never gets its `noindex` read, so that combination is reported as `REQUIRED_NOINDEX_UNREACHABLE` rather than passing.
 - configured `required_robots_disallow_paths` stay blocked for `User-agent: *`. Use this contract for private application routes and callbacks that should not be crawled. These paths are not fetched because their exclusion is the behavior under test.
+- repositories with non-production homepage metadata are explicitly classified as `prototype`, `client`, or `retired`. The audit verifies each configured homepage policy and reports stale links as `REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY` when no supported public deployment exists.
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
@@ -34,7 +35,24 @@ gh auth status
 python3 tools/update_repo_homepages.py --apply
 ```
 
-The default mode is read-only and prints copyable `gh api` commands. Apply mode checks the homepage returned by every GitHub update and stops if GitHub does not persist the canonical value.
+The default mode is read-only and prints copyable `gh api` commands. Apply mode checks the homepage returned by every GitHub update and stops if GitHub does not persist the canonical value. The same command also clears homepage fields for classified non-production repositories whose `expected_homepage` is empty.
+
+## Non-production repository classification
+
+Add public production sites to `sites`. Add repository-owned deployments that must not enter the production fleet to `repository_homepages`:
+
+```json
+{
+  "repository": "QuantAlchemy/example",
+  "classification": "prototype",
+  "expected_homepage": "",
+  "note": "Internal prototype with no supported public deployment."
+}
+```
+
+Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. Set `expected_homepage` to an explicit HTTPS origin only when the non-production deployment should remain linked. Otherwise, keep it empty so the owner-action tool removes stale public metadata. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
+
+Morning Edge and other dynamic inventory jobs must use this audit receipt as the classification source of truth. They must not treat every non-empty GitHub homepage field as a QuantAlchemy production website.
 
 ## Local verification
 
