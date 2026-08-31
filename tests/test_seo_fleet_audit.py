@@ -3,6 +3,7 @@ from email.message import Message
 from io import StringIO
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
@@ -167,6 +168,30 @@ class SeoFleetAuditTests(unittest.TestCase):
             netly,
         )
 
+    def test_public_sites_config_classifies_zombie_homepages(self) -> None:
+        payload = json.loads(Path("config/public-sites.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            [
+                {
+                    "repository": "QuantAlchemy/solbeauty",
+                    "classification": "client",
+                    "expected_homepage": "https://www.solbeauty.studio",
+                    "note": "Client production site, excluded from the QuantAlchemy fleet.",
+                },
+                {
+                    "repository": "QuantAlchemy/trading-journal",
+                    "classification": "retired",
+                    "expected_homepage": "",
+                    "note": (
+                        "Superseded by the Trading Journal at "
+                        "https://www.quant-companion.quantalchemy.io/journal."
+                    ),
+                },
+            ],
+            payload["repository_homepages"],
+        )
+
     def test_repository_homepage_accepts_exact_origin_and_trailing_slash(self) -> None:
         site = SiteConfig(
             name="Example",
@@ -315,6 +340,11 @@ class SeoFleetAuditTests(unittest.TestCase):
 
         with (
             patch.object(seo_fleet_audit, "_load_sites", return_value=[site]),
+            patch.object(
+                seo_fleet_audit,
+                "_load_repository_homepages",
+                return_value=[],
+            ),
             patch.object(seo_fleet_audit, "audit_site", return_value=audit),
             patch.object(
                 seo_fleet_audit,
@@ -341,6 +371,11 @@ class SeoFleetAuditTests(unittest.TestCase):
 
         with (
             patch.object(seo_fleet_audit, "_load_sites", return_value=[site]),
+            patch.object(
+                seo_fleet_audit,
+                "_load_repository_homepages",
+                return_value=[],
+            ),
             patch.object(seo_fleet_audit, "audit_site", return_value=audit),
             patch.object(
                 seo_fleet_audit,
@@ -357,6 +392,66 @@ class SeoFleetAuditTests(unittest.TestCase):
             ["REPOSITORY_HOMEPAGE_MISMATCH"],
             [finding.code for finding in audit.findings],
         )
+
+    def test_main_reports_classified_nonproduction_homepage_drift(self) -> None:
+        observed = {
+            "QuantAlchemy/solbeauty": "https://ben-hairstyle.vercel.app",
+            "QuantAlchemy/trading-journal": (
+                "https://trading-journal-rho-sand.vercel.app"
+            ),
+        }
+        output = StringIO()
+
+        with (
+            patch.object(seo_fleet_audit, "_load_sites", return_value=[]),
+            patch.object(
+                seo_fleet_audit,
+                "fetch_repository_homepage",
+                side_effect=observed.__getitem__,
+            ),
+            redirect_stdout(output),
+        ):
+            status = seo_fleet_audit.main(
+                ["--config", "config/public-sites.json"]
+            )
+
+        report = output.getvalue()
+        self.assertEqual(1, status)
+        self.assertIn("2 classified non-production repositories", report)
+        self.assertIn("`QuantAlchemy/solbeauty`: **client**", report)
+        self.assertIn("`QuantAlchemy/trading-journal`: **retired**", report)
+        self.assertEqual(1, report.count("REPOSITORY_HOMEPAGE_MISMATCH"))
+        self.assertEqual(1, report.count("REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY"))
+        self.assertIn("https://ben-hairstyle.vercel.app", report)
+        self.assertIn("https://trading-journal-rho-sand.vercel.app", report)
+
+    def test_main_accepts_classified_nonproduction_homepage_policies(
+        self,
+    ) -> None:
+        output = StringIO()
+
+        with (
+            patch.object(seo_fleet_audit, "_load_sites", return_value=[]),
+            patch.object(
+                seo_fleet_audit,
+                "fetch_repository_homepage",
+                side_effect={
+                    "QuantAlchemy/solbeauty": "https://www.solbeauty.studio/",
+                    "QuantAlchemy/trading-journal": "",
+                }.__getitem__,
+            ),
+            redirect_stdout(output),
+        ):
+            status = seo_fleet_audit.main(
+                ["--config", "config/public-sites.json"]
+            )
+
+        report = output.getvalue()
+        self.assertEqual(0, status)
+        self.assertIn("2 classified non-production repositories", report)
+        self.assertIn("Client production site", report)
+        self.assertIn("Superseded by the Trading Journal", report)
+        self.assertNotIn("REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY", report)
 
     def test_healthy_site_checks_root_robots_sitemap_and_every_loc(self) -> None:
         origin = "https://example.com"
@@ -1192,6 +1287,141 @@ class SeoFleetAuditTests(unittest.TestCase):
                         origin="https://example.com",
                         repository=repository,
                     )
+
+    def test_repository_homepage_classification_rejects_non_origins(self) -> None:
+        for homepage in (
+            "http://example.com",
+            "https://example.com:8443",
+            "https://example.com/path",
+            "https://example.com?preview=1",
+        ):
+            with self.subTest(homepage=homepage):
+                with self.assertRaises(ValueError):
+                    seo_fleet_audit.RepositoryHomepageConfig(
+                        repository="Example/site",
+                        classification="prototype",
+                        expected_homepage=homepage,
+                        note="Prototype deployment.",
+                    )
+
+        with self.assertRaises(ValueError):
+            seo_fleet_audit.RepositoryHomepageConfig(
+                repository="Example/site",
+                classification="production",
+                expected_homepage="",
+                note="Production belongs in the sites list.",
+            )
+
+    def test_repository_homepage_requires_an_explicit_string_target(self) -> None:
+        with self.assertRaises(TypeError):
+            seo_fleet_audit.RepositoryHomepageConfig(
+                repository="Example/site",
+                classification="prototype",
+                note="Missing target must not imply a destructive clear.",
+            )
+
+        for homepage in (None, 123, False):
+            with self.subTest(homepage=homepage):
+                with self.assertRaisesRegex(ValueError, "must be a string"):
+                    seo_fleet_audit.RepositoryHomepageConfig(
+                        repository="Example/site",
+                        classification="prototype",
+                        expected_homepage=homepage,  # type: ignore[arg-type]
+                        note="Invalid target must not imply a destructive clear.",
+                    )
+
+    def test_repository_homepage_loader_rejects_duplicate_repositories(self) -> None:
+        duplicate_configs = [
+            {
+                "sites": [
+                    {
+                        "name": "One",
+                        "origin": "https://one.example.com",
+                        "repository": "Example/site",
+                    },
+                    {
+                        "name": "Two",
+                        "origin": "https://two.example.com",
+                        "repository": "example/SITE",
+                    },
+                ],
+                "repository_homepages": [],
+            },
+            {
+                "sites": [
+                    {
+                        "name": "Example",
+                        "origin": "https://www.example.com",
+                        "repository": "Example/site",
+                    }
+                ],
+                "repository_homepages": [
+                    {
+                        "repository": "example/SITE",
+                        "classification": "prototype",
+                        "expected_homepage": "",
+                        "note": "Conflicts with the production site.",
+                    }
+                ],
+            },
+            {
+                "sites": [],
+                "repository_homepages": [
+                    {
+                        "repository": "Example/site",
+                        "classification": "prototype",
+                        "expected_homepage": "",
+                        "note": "First policy.",
+                    },
+                    {
+                        "repository": "example/SITE",
+                        "classification": "retired",
+                        "expected_homepage": "",
+                        "note": "Conflicting policy.",
+                    },
+                ],
+            },
+        ]
+
+        for index, payload in enumerate(duplicate_configs):
+            with self.subTest(index=index), TemporaryDirectory() as directory:
+                config = Path(directory) / "sites.json"
+                config.write_text(json.dumps(payload), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "duplicate repository"):
+                    seo_fleet_audit._load_repository_homepages(config)
+
+    def test_main_rejects_duplicate_repositories_before_auditing(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "sites.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "sites": [
+                            {
+                                "name": "One",
+                                "origin": "https://one.example.com",
+                                "repository": "Example/site",
+                            },
+                            {
+                                "name": "Two",
+                                "origin": "https://two.example.com",
+                                "repository": "example/SITE",
+                            },
+                        ],
+                        "repository_homepages": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(seo_fleet_audit, "audit_site") as audit_site,
+                self.assertRaisesRegex(ValueError, "duplicate repository"),
+            ):
+                seo_fleet_audit.main(["--config", str(config)])
+
+        audit_site.assert_not_called()
 
     def test_site_contract_rejects_non_path_expectations(self) -> None:
         for field, value in [

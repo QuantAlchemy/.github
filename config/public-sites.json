@@ -77,5 +77,19 @@
         "/settings"
       ]
     }
+  ],
+  "repository_homepages": [
+    {
+      "repository": "QuantAlchemy/solbeauty",
+      "classification": "client",
+      "expected_homepage": "https://www.solbeauty.studio",
+      "note": "Client production site, excluded from the QuantAlchemy fleet."
+    },
+    {
+      "repository": "QuantAlchemy/trading-journal",
+      "classification": "retired",
+      "expected_homepage": "",
+      "note": "Superseded by the Trading Journal at https://www.quant-companion.quantalchemy.io/journal."
+    }
   ]
 }

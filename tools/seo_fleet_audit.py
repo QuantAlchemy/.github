@@ -28,6 +28,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 USER_AGENT = "QuantAlchemy-SEOFleetAudit/1.0"
 MAX_BODY_BYTES = 5 * 1024 * 1024
 XML_CONTENT_TYPES = ("application/xml", "text/xml", "+xml")
+NON_PRODUCTION_CLASSIFICATIONS = frozenset({"prototype", "client", "retired"})
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,58 @@ class SiteConfig:
             )
 
 
+@dataclass(frozen=True)
+class RepositoryHomepageConfig:
+    repository: str
+    classification: str
+    expected_homepage: str
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repository
+        ):
+            raise ValueError(
+                "repository homepage entries must use the GitHub owner/name format: "
+                f"{self.repository}"
+            )
+        if self.classification not in NON_PRODUCTION_CLASSIFICATIONS:
+            raise ValueError(
+                f"{self.repository}: classification must be one of "
+                f"{', '.join(sorted(NON_PRODUCTION_CLASSIFICATIONS))}"
+            )
+        if not isinstance(self.expected_homepage, str):
+            raise ValueError(
+                f"{self.repository}: expected_homepage must be a string"
+            )
+        if self.expected_homepage:
+            parsed = urlsplit(self.expected_homepage)
+            try:
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError(
+                    f"{self.repository}: expected_homepage has an invalid port"
+                ) from exc
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or port not in {None, 443}
+                or parsed.path.rstrip("/")
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    f"{self.repository}: expected_homepage must be empty or an HTTPS origin"
+                )
+            object.__setattr__(
+                self, "expected_homepage", self.expected_homepage.rstrip("/")
+            )
+        if not isinstance(self.note, str) or not self.note.strip():
+            raise ValueError(f"{self.repository}: note must explain the classification")
+
+
 def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"non-standard JSON constant: {value}")
 
@@ -149,6 +202,16 @@ class SiteAudit:
     findings: list[Finding] = field(default_factory=list)
     checked_urls: int = 0
     sitemap_urls: int = 0
+
+    @property
+    def healthy(self) -> bool:
+        return not self.findings
+
+
+@dataclass
+class RepositoryHomepageAudit:
+    config: RepositoryHomepageConfig
+    findings: list[Finding] = field(default_factory=list)
 
     @property
     def healthy(self) -> bool:
@@ -459,6 +522,61 @@ def audit_repository_homepages(
             finding.code == "REPOSITORY_HOMEPAGE_LOOKUP_FAILED" for finding in findings
         )
     return lookup_failed
+
+
+def audit_classified_repository_homepages(
+    configs: Iterable[RepositoryHomepageConfig],
+    homepage_fetcher: Callable[[str], str],
+) -> tuple[list[RepositoryHomepageAudit], bool]:
+    """Audit explicitly non-production repository homepage policies."""
+    audits: list[RepositoryHomepageAudit] = []
+    lookup_failed = False
+    for config in configs:
+        audit = RepositoryHomepageAudit(config)
+        repository_url = f"https://github.com/{config.repository}"
+        try:
+            observed = homepage_fetcher(config.repository).strip()
+        except Exception as exc:
+            audit.findings.append(
+                Finding(
+                    "REPOSITORY_HOMEPAGE_LOOKUP_FAILED",
+                    repository_url,
+                    config.expected_homepage or "empty homepage",
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
+            lookup_failed = True
+        else:
+            expected = config.expected_homepage
+            if not expected and observed:
+                audit.findings.append(
+                    Finding(
+                        "REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY",
+                        repository_url,
+                        "empty homepage",
+                        observed,
+                    )
+                )
+            elif expected and not observed:
+                audit.findings.append(
+                    Finding(
+                        "REPOSITORY_HOMEPAGE_MISSING",
+                        repository_url,
+                        expected,
+                        "empty homepage",
+                    )
+                )
+            elif expected and observed not in {expected, f"{expected}/"}:
+                audit.findings.append(
+                    Finding(
+                        "REPOSITORY_HOMEPAGE_MISMATCH",
+                        repository_url,
+                        expected,
+                        observed,
+                    )
+                )
+        audits.append(audit)
+    return audits, lookup_failed
 
 
 def fetch_repository_homepage(repository: str) -> str:
@@ -904,9 +1022,15 @@ def _audit_sitemap(
             list(executor.map(audit_loc, locs))
 
 
-def render_markdown(audits: Iterable[SiteAudit]) -> str:
+def render_markdown(
+    audits: Iterable[SiteAudit],
+    repository_homepage_audits: Iterable[RepositoryHomepageAudit] = (),
+) -> str:
     audit_list = list(audits)
-    finding_count = sum(len(audit.findings) for audit in audit_list)
+    homepage_audit_list = list(repository_homepage_audits)
+    finding_count = sum(len(audit.findings) for audit in audit_list) + sum(
+        len(audit.findings) for audit in homepage_audit_list
+    )
     checked_count = sum(audit.checked_urls for audit in audit_list)
     sitemap_count = sum(audit.sitemap_urls for audit in audit_list)
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -916,8 +1040,10 @@ def render_markdown(audits: Iterable[SiteAudit]) -> str:
         f"Generated: `{generated}`",
         "",
         (
-            f"**Summary:** {len(audit_list)} sites; {checked_count} fetched URLs; "
-            f"{sitemap_count} sitemap page URLs; {finding_count} defects."
+            f"**Summary:** {len(audit_list)} sites; "
+            f"{len(homepage_audit_list)} classified non-production repositories; "
+            f"{checked_count} fetched URLs; {sitemap_count} sitemap page URLs; "
+            f"{finding_count} defects."
         ),
         "",
     ]
@@ -946,6 +1072,29 @@ def render_markdown(audits: Iterable[SiteAudit]) -> str:
             )
         lines.append("")
 
+    if homepage_audit_list:
+        lines.extend(["## Repository Homepage Classifications", ""])
+        for audit in homepage_audit_list:
+            icon = "✅" if audit.healthy else "❌"
+            lines.extend(
+                [
+                    (
+                        f"### {icon} `{audit.config.repository}`: "
+                        f"**{audit.config.classification}**"
+                    ),
+                    "",
+                    audit.config.note,
+                    "",
+                ]
+            )
+            for finding in audit.findings:
+                lines.append(
+                    f"- **{finding.code}** — `{finding.url}` — "
+                    f"expected: {finding.expected}; observed: {finding.observed}"
+                )
+            if audit.findings:
+                lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -955,10 +1104,47 @@ def _load_sites(path: Path) -> list[SiteConfig]:
     return [SiteConfig(**row) for row in rows]
 
 
-def _json_payload(audits: list[SiteAudit]) -> dict[str, object]:
+def parse_repository_homepages(payload: object) -> list[RepositoryHomepageConfig]:
+    """Parse non-production homepage policies without duplicate repositories."""
+    if not isinstance(payload, dict):
+        return []
+    seen: dict[str, str] = {}
+    for row in payload.get("sites", []):
+        if not isinstance(row, dict) or not row.get("repository"):
+            continue
+        repository = str(row["repository"])
+        key = repository.casefold()
+        if key in seen:
+            raise ValueError(f"duplicate repository homepage policy: {repository}")
+        seen[key] = repository
+
+    configs: list[RepositoryHomepageConfig] = []
+    for row in payload.get("repository_homepages", []):
+        config = RepositoryHomepageConfig(**row)
+        key = config.repository.casefold()
+        if key in seen:
+            raise ValueError(
+                f"duplicate repository homepage policy: {config.repository}"
+            )
+        seen[key] = config.repository
+        configs.append(config)
+    return configs
+
+
+def _load_repository_homepages(path: Path) -> list[RepositoryHomepageConfig]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return parse_repository_homepages(payload)
+
+
+def _json_payload(
+    audits: list[SiteAudit],
+    repository_homepage_audits: list[RepositoryHomepageAudit] | None = None,
+) -> dict[str, object]:
+    homepage_audits = repository_homepage_audits or []
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "healthy": all(audit.healthy for audit in audits),
+        "healthy": all(audit.healthy for audit in audits)
+        and all(audit.healthy for audit in homepage_audits),
         "sites": [
             {
                 "site": asdict(audit.site),
@@ -968,6 +1154,14 @@ def _json_payload(audits: list[SiteAudit]) -> dict[str, object]:
                 "findings": [asdict(finding) for finding in audit.findings],
             }
             for audit in audits
+        ],
+        "repositoryHomepages": [
+            {
+                "config": asdict(audit.config),
+                "healthy": audit.healthy,
+                "findings": [asdict(finding) for finding in audit.findings],
+            }
+            for audit in homepage_audits
         ],
     }
 
@@ -980,14 +1174,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-workers", type=int, default=8)
     args = parser.parse_args(argv)
 
+    sites = _load_sites(args.config)
+    repository_homepage_configs = _load_repository_homepages(args.config)
     audits = [
         audit_site(site, max_workers=args.max_workers)
-        for site in _load_sites(args.config)
+        for site in sites
     ]
     homepage_lookup_failed = audit_repository_homepages(
         audits, fetch_repository_homepage
     )
-    markdown = render_markdown(audits)
+    repository_homepage_audits, classification_lookup_failed = (
+        audit_classified_repository_homepages(
+            repository_homepage_configs, fetch_repository_homepage
+        )
+    )
+    markdown = render_markdown(audits, repository_homepage_audits)
     print(markdown, end="")
 
     if args.markdown_out:
@@ -996,12 +1197,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(
-            json.dumps(_json_payload(audits), indent=2) + "\n", encoding="utf-8"
+            json.dumps(
+                _json_payload(audits, repository_homepage_audits), indent=2
+            )
+            + "\n",
+            encoding="utf-8",
         )
 
-    if homepage_lookup_failed:
+    if homepage_lookup_failed or classification_lookup_failed:
         return 2
-    return 0 if all(audit.healthy for audit in audits) else 1
+    return (
+        0
+        if all(audit.healthy for audit in audits)
+        and all(audit.healthy for audit in repository_homepage_audits)
+        else 1
+    )
 
 
 if __name__ == "__main__":

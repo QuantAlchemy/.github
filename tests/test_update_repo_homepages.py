@@ -38,7 +38,15 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
                                 "name": "No repository",
                                 "origin": "https://docs.example.com",
                             },
-                        ]
+                        ],
+                        "repository_homepages": [
+                            {
+                                "repository": "Example/client-site",
+                                "classification": "client",
+                                "expected_homepage": "https://client.example.com",
+                                "note": "Client production site.",
+                            }
+                        ],
                     }
                 ),
                 encoding="utf-8",
@@ -51,7 +59,11 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
                 update_repo_homepages.HomepageTarget(
                     repository="Example/site",
                     homepage="https://www.example.com",
-                )
+                ),
+                update_repo_homepages.HomepageTarget(
+                    repository="Example/client-site",
+                    homepage="https://client.example.com",
+                ),
             ],
             targets,
         )
@@ -93,6 +105,66 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
             ],
             updates,
         )
+
+    def test_load_targets_rejects_duplicate_repository_classifications(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "sites.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "sites": [
+                            {
+                                "name": "Example",
+                                "origin": "https://www.example.com",
+                                "repository": "Example/site",
+                            }
+                        ],
+                        "repository_homepages": [
+                            {
+                                "repository": "example/SITE",
+                                "classification": "prototype",
+                                "expected_homepage": "",
+                                "note": "Conflicts with the production site.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "duplicate repository"):
+                update_repo_homepages.load_targets(config)
+
+    def test_load_targets_rejects_missing_or_null_expected_homepage(self) -> None:
+        invalid_policies = [
+            {
+                "repository": "Example/missing",
+                "classification": "prototype",
+                "note": "Missing target.",
+            },
+            {
+                "repository": "Example/null",
+                "classification": "retired",
+                "expected_homepage": None,
+                "note": "Null target.",
+            },
+        ]
+
+        for policy in invalid_policies:
+            with self.subTest(repository=policy["repository"]), TemporaryDirectory() as directory:
+                config = Path(directory) / "sites.json"
+                config.write_text(
+                    json.dumps(
+                        {
+                            "sites": [],
+                            "repository_homepages": [policy],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaises((TypeError, ValueError)):
+                    update_repo_homepages.load_targets(config)
 
     def test_github_api_failure_preserves_actionable_error_text(self) -> None:
         failure = subprocess.CalledProcessError(
@@ -230,6 +302,39 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
             output.getvalue(),
         )
         self.assertIn("Re-run with --apply", output.getvalue())
+
+    def test_dry_run_labels_an_empty_homepage_target(self) -> None:
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / "sites.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "sites": [],
+                        "repository_homepages": [
+                            {
+                                "repository": "Example/client-site",
+                                "classification": "client",
+                                "expected_homepage": "",
+                                "note": "No supported public deployment.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                status = update_repo_homepages.main(
+                    ["--config", str(config)],
+                    homepage_fetcher=lambda _repository: "https://preview.example.net",
+                )
+
+        self.assertEqual(1, status)
+        self.assertIn(
+            "https://preview.example.net -> empty homepage", output.getvalue()
+        )
+        self.assertIn("--field homepage=", output.getvalue())
 
     def test_apply_mode_reports_permission_failure_without_a_traceback(self) -> None:
         with TemporaryDirectory() as directory:

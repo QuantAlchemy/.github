@@ -14,9 +14,9 @@ import sys
 from typing import Callable
 
 if __package__:
-    from tools.seo_fleet_audit import SiteConfig
+    from tools.seo_fleet_audit import SiteConfig, parse_repository_homepages
 else:
-    from seo_fleet_audit import SiteConfig
+    from seo_fleet_audit import SiteConfig, parse_repository_homepages
 
 MAX_GITHUB_RESPONSE_BYTES = 5 * 1024 * 1024
 
@@ -35,15 +35,22 @@ class HomepageUpdate:
 
 
 def load_targets(path: Path) -> list[HomepageTarget]:
-    """Load repo-to-origin targets from the fleet's canonical site map."""
+    """Load every expected GitHub homepage from the fleet configuration."""
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload["sites"] if isinstance(payload, dict) else payload
     sites = [SiteConfig(**row) for row in rows]
-    return [
+    targets = [
         HomepageTarget(site.repository, site.origin)
         for site in sites
         if site.repository
     ]
+    if isinstance(payload, dict):
+        classified = parse_repository_homepages(payload)
+        targets.extend(
+            HomepageTarget(item.repository, item.expected_homepage)
+            for item in classified
+        )
+    return targets
 
 
 def find_updates(
@@ -165,7 +172,8 @@ def main(
     print(f"{len(updates)} repository homepage {noun} required:")
     for update in updates:
         observed = update.observed or "empty homepage"
-        print(f"- {update.repository}: {observed} -> {update.homepage}")
+        target = update.homepage or "empty homepage"
+        print(f"- {update.repository}: {observed} -> {target}")
         print(f"  {render_command(update)}")
 
     if not args.apply:
