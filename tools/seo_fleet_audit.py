@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
 import re
+import selectors
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +23,7 @@ from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Callable, Iterable
 from urllib.error import HTTPError
 from urllib.parse import unquote, urljoin, urlsplit
@@ -29,6 +33,10 @@ USER_AGENT = "QuantAlchemy-SEOFleetAudit/1.0"
 MAX_BODY_BYTES = 5 * 1024 * 1024
 XML_CONTENT_TYPES = ("application/xml", "text/xml", "+xml")
 NON_PRODUCTION_CLASSIFICATIONS = frozenset({"prototype", "client", "retired"})
+INVENTORY_PAGE_SIZE = 100
+MAX_INVENTORY_PAGES = 100
+INVENTORY_TIMEOUT_SECONDS = 10.0
+MAX_INVENTORY_OUTPUT_BYTES = 5 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -216,6 +224,22 @@ class RepositoryHomepageAudit:
     @property
     def healthy(self) -> bool:
         return not self.findings
+
+
+@dataclass
+class RepositoryInventoryAudit:
+    organization: str
+    complete: bool = False
+    page_count: int = 0
+    checked_repositories: int = 0
+    nonempty_homepages: int = 0
+    classified_repositories: int = 0
+    unclassified_homepages: int = 0
+    findings: list[Finding] = field(default_factory=list)
+
+    @property
+    def healthy(self) -> bool:
+        return self.complete and not self.findings
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -608,6 +632,140 @@ def fetch_repository_homepage(repository: str) -> str:
         )
     homepage = payload.get("homepage")
     return homepage if isinstance(homepage, str) else ""
+
+
+def fetch_repository_inventory_page(organization: str, page: int) -> object:
+    """Read one GitHub page with bounded time and combined stdout/stderr bytes."""
+    gh = shutil.which("gh")
+    if not gh:
+        raise RuntimeError("authenticated gh CLI is unavailable")
+    endpoint = (
+        f"orgs/{organization}/repos?type=all&sort=full_name&direction=asc"
+        f"&per_page={INVENTORY_PAGE_SIZE}&page={page}"
+    )
+    deadline = monotonic() + INVENTORY_TIMEOUT_SECONDS
+    output, errors = bytearray(), bytearray()
+    # The scheduled runner is POSIX. Kill the group on failure so gh wrappers
+    # cannot leave a child holding the output pipes open after the deadline.
+    with subprocess.Popen(
+        [gh, "api", "--method", "GET", endpoint],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+    ) as process, selectors.DefaultSelector() as selector:
+        assert process.stdout is not None and process.stderr is not None
+        selector.register(process.stdout, selectors.EVENT_READ, output)
+        selector.register(process.stderr, selectors.EVENT_READ, errors)
+        try:
+            while selector.get_map():
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("GitHub inventory lookup timed out")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, min(
+                        65536, MAX_INVENTORY_OUTPUT_BYTES + 1 - len(output) - len(errors)
+                    ))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    key.data.extend(chunk)
+                    if len(output) + len(errors) > MAX_INVENTORY_OUTPUT_BYTES:
+                        raise RuntimeError(
+                            f"GitHub inventory output exceeded {MAX_INVENTORY_OUTPUT_BYTES} bytes"
+                        )
+            try:
+                process.wait(timeout=max(0, deadline - monotonic()))
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("GitHub inventory lookup timed out") from exc
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise
+        if process.returncode:
+            detail = (errors or output).decode("utf-8", errors="replace")[:1000]
+            raise RuntimeError(f"GitHub inventory lookup failed: {detail.strip()}")
+    try:
+        return _parse_strict_json(output.decode("utf-8"))
+    except (ValueError, RecursionError, InvalidOperation) as exc:
+        raise ValueError(f"invalid GitHub inventory JSON: {exc}") from exc
+
+
+def audit_repository_inventory(
+    sites: Iterable[SiteConfig],
+    configs: Iterable[RepositoryHomepageConfig],
+    page_fetcher: Callable[[str, int], object],
+) -> list[RepositoryInventoryAudit]:
+    """Discover unclassified metadata, never crawl or enroll discovered URLs."""
+    known = {item.repository.casefold() for item in (*sites, *configs) if item.repository}
+    organizations = sorted({repository.split("/")[0] for repository in known})
+    audits: list[RepositoryInventoryAudit] = []
+    for organization in organizations:
+        audit = RepositoryInventoryAudit(organization)
+        repositories: dict[str, tuple[str, str]] = {}
+        failure: Finding | None = None
+        try:
+            for page in range(1, MAX_INVENTORY_PAGES + 1):
+                payload = page_fetcher(organization, page)
+                if not isinstance(payload, list) or len(payload) > INVENTORY_PAGE_SIZE:
+                    raise ValueError(f"page {page}: expected a repository array within the page size")
+                # Commit a page only after every row passes validation. Earlier
+                # pages remain coverage evidence if a later page is invalid.
+                pending = dict(repositories)
+                for index, row in enumerate(payload, 1):
+                    if not isinstance(row, dict):
+                        raise ValueError(f"page {page}, row {index}: expected an object")
+                    repository = row.get("full_name")
+                    if (
+                        not isinstance(repository, str)
+                        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                        or repository.split("/")[0].casefold() != organization
+                        or repository.split("/")[1] in {".", ".."}
+                    ):
+                        raise ValueError(f"page {page}, row {index}: invalid full_name for {organization}")
+                    homepage = row.get("homepage")
+                    if "homepage" not in row or (homepage is not None and not isinstance(homepage, str)):
+                        raise ValueError(f"page {page}, row {index}: homepage must be a string or null")
+                    observed = homepage if homepage is not None else ""
+                    # Reject lone JSON surrogates before UTF-8 receipt output.
+                    observed.encode("utf-8")
+                    key = repository.casefold()
+                    previous = pending.get(key)
+                    if previous and previous[1] != observed:
+                        raise ValueError(f"page {page}: conflicting duplicate repository {repository}")
+                    # Stable spelling regardless of page order; observed URLs
+                    # are never stripped, casefolded, or otherwise normalized.
+                    spelling = min(previous[0], repository) if previous else repository
+                    pending[key] = (spelling, observed)
+                repositories = pending
+                audit.page_count += 1
+                if len(payload) < INVENTORY_PAGE_SIZE:
+                    audit.complete = True
+                    break
+            if not audit.complete:
+                raise ValueError(f"inventory page limit exceeded ({MAX_INVENTORY_PAGES})")
+        except Exception as exc:
+            failure = Finding(
+                "REPOSITORY_INVENTORY_LOOKUP_FAILED",
+                f"https://api.github.com/orgs/{organization}/repos",
+                "a complete, valid inventory of repositories visible to the credential",
+                f"{type(exc).__name__}: {exc}"[:2000],
+            )
+        audit.checked_repositories = len(repositories)
+        for key, (repository, homepage) in sorted(repositories.items()):
+            audit.classified_repositories += int(key in known)
+            audit.nonempty_homepages += int(bool(homepage))
+            if homepage and key not in known:
+                audit.unclassified_homepages += 1
+                audit.findings.append(Finding(
+                    "REPOSITORY_HOMEPAGE_UNCLASSIFIED",
+                    f"https://github.com/{repository}",
+                    "an explicit sites or repository_homepages policy",
+                    homepage,
+                ))
+        if failure:
+            audit.findings.append(failure)
+        audits.append(audit)
+    return audits
 
 
 def _host(url: str) -> str:
@@ -1025,12 +1183,14 @@ def _audit_sitemap(
 def render_markdown(
     audits: Iterable[SiteAudit],
     repository_homepage_audits: Iterable[RepositoryHomepageAudit] = (),
+    repository_inventory_audits: Iterable[RepositoryInventoryAudit] = (),
 ) -> str:
     audit_list = list(audits)
     homepage_audit_list = list(repository_homepage_audits)
+    inventory_audit_list = list(repository_inventory_audits)
     finding_count = sum(len(audit.findings) for audit in audit_list) + sum(
         len(audit.findings) for audit in homepage_audit_list
-    )
+    ) + sum(len(audit.findings) for audit in inventory_audit_list)
     checked_count = sum(audit.checked_urls for audit in audit_list)
     sitemap_count = sum(audit.sitemap_urls for audit in audit_list)
     generated = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1095,6 +1255,34 @@ def render_markdown(
             if audit.findings:
                 lines.append("")
 
+    if inventory_audit_list:
+        lines.extend(["## Repository Homepage Inventory", ""])
+        for audit in inventory_audit_list:
+            state = "complete" if audit.complete else "incomplete"
+            lines.extend([
+                f"### `{audit.organization}`",
+                "",
+                f"Inventory: {state}; {audit.page_count} validated pages; "
+                f"{audit.checked_repositories} visible repositories; "
+                f"{audit.nonempty_homepages} nonempty homepages; "
+                f"{audit.classified_repositories} classified repositories; "
+                f"{audit.unclassified_homepages} unclassified homepages.",
+                "",
+            ])
+            for finding in audit.findings:
+                # Preserve exact evidence without letting metadata inject Markdown.
+                fence = "`" * max(3, 1 + max(
+                    (len(run) for run in re.findall(r"`+", finding.observed)), default=0
+                ))
+                lines.append(
+                    f"- **{finding.code}** - `{finding.url}` - "
+                    f"expected: {finding.expected}; observed:\n\n"
+                    f"{fence}text\n{finding.observed}\n{fence}\n"
+                )
+            if audit.healthy:
+                lines.append("No unclassified homepages found in the visible inventory.")
+            lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1139,12 +1327,15 @@ def _load_repository_homepages(path: Path) -> list[RepositoryHomepageConfig]:
 def _json_payload(
     audits: list[SiteAudit],
     repository_homepage_audits: list[RepositoryHomepageAudit] | None = None,
+    repository_inventory_audits: list[RepositoryInventoryAudit] | None = None,
 ) -> dict[str, object]:
     homepage_audits = repository_homepage_audits or []
+    inventory_audits = repository_inventory_audits or []
     return {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "healthy": all(audit.healthy for audit in audits)
-        and all(audit.healthy for audit in homepage_audits),
+        and all(audit.healthy for audit in homepage_audits)
+        and all(audit.healthy for audit in inventory_audits),
         "sites": [
             {
                 "site": asdict(audit.site),
@@ -1162,6 +1353,20 @@ def _json_payload(
                 "findings": [asdict(finding) for finding in audit.findings],
             }
             for audit in homepage_audits
+        ],
+        "repositoryInventory": [
+            {
+                "organization": audit.organization,
+                "complete": audit.complete,
+                "healthy": audit.healthy,
+                "pageCount": audit.page_count,
+                "checkedRepositories": audit.checked_repositories,
+                "nonemptyHomepages": audit.nonempty_homepages,
+                "classifiedRepositories": audit.classified_repositories,
+                "unclassifiedHomepages": audit.unclassified_homepages,
+                "findings": [asdict(finding) for finding in audit.findings],
+            }
+            for audit in inventory_audits
         ],
     }
 
@@ -1188,7 +1393,12 @@ def main(argv: list[str] | None = None) -> int:
             repository_homepage_configs, fetch_repository_homepage
         )
     )
-    markdown = render_markdown(audits, repository_homepage_audits)
+    repository_inventory_audits = audit_repository_inventory(
+        sites, repository_homepage_configs, fetch_repository_inventory_page
+    )
+    markdown = render_markdown(
+        audits, repository_homepage_audits, repository_inventory_audits
+    )
     print(markdown, end="")
 
     if args.markdown_out:
@@ -1198,18 +1408,21 @@ def main(argv: list[str] | None = None) -> int:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(
             json.dumps(
-                _json_payload(audits, repository_homepage_audits), indent=2
+                _json_payload(audits, repository_homepage_audits, repository_inventory_audits),
+                indent=2,
             )
             + "\n",
             encoding="utf-8",
         )
 
-    if homepage_lookup_failed or classification_lookup_failed:
+    if (homepage_lookup_failed or classification_lookup_failed
+            or any(not audit.complete for audit in repository_inventory_audits)):
         return 2
     return (
         0
         if all(audit.healthy for audit in audits)
         and all(audit.healthy for audit in repository_homepage_audits)
+        and all(audit.healthy for audit in repository_inventory_audits)
         else 1
     )
 

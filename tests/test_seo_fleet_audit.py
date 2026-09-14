@@ -189,7 +189,29 @@ class SeoFleetAuditTests(unittest.TestCase):
                     ),
                 },
             ],
-            payload["repository_homepages"],
+            payload["repository_homepages"][:2],
+        )
+        prototypes = payload["repository_homepages"][2:]
+        self.assertEqual(
+            [
+                "QuantAlchemy/hello-convex-workos",
+                "QuantAlchemy/insights-alembic",
+                "QuantAlchemy/ucount-self-headless",
+            ],
+            [row["repository"] for row in prototypes],
+        )
+        for row in prototypes:
+            self.assertEqual("prototype", row["classification"])
+            self.assertEqual("", row["expected_homepage"])
+            self.assertIn("dev/test only", row["note"])
+        self.assertEqual(
+            [
+                "QuantAlchemy/qa-website", "QuantAlchemy/krown-website",
+                "QuantAlchemy/krown-ai", "QuantAlchemy/ai-algo-factory",
+                "QuantAlchemy/jest-qa", "QuantAlchemy/quant-companion",
+                "QuantAlchemy/clickalchemy", "QuantAlchemy/netly",
+            ],
+            [row["repository"] for row in payload["sites"]],
         )
 
     def test_repository_homepage_accepts_exact_origin_and_trailing_slash(self) -> None:
@@ -347,6 +369,10 @@ class SeoFleetAuditTests(unittest.TestCase):
             ),
             patch.object(seo_fleet_audit, "audit_site", return_value=audit),
             patch.object(
+                seo_fleet_audit, "fetch_repository_inventory_page",
+                return_value=[{"full_name": site.repository, "homepage": site.origin}],
+            ),
+            patch.object(
                 seo_fleet_audit,
                 "audit_repository_homepages",
                 return_value=True,
@@ -378,6 +404,10 @@ class SeoFleetAuditTests(unittest.TestCase):
             ),
             patch.object(seo_fleet_audit, "audit_site", return_value=audit),
             patch.object(
+                seo_fleet_audit, "fetch_repository_inventory_page",
+                return_value=[{"full_name": site.repository, "homepage": site.origin}],
+            ),
+            patch.object(
                 seo_fleet_audit,
                 "fetch_repository_homepage",
                 return_value="https://preview.example.com",
@@ -395,6 +425,9 @@ class SeoFleetAuditTests(unittest.TestCase):
 
     def test_main_reports_classified_nonproduction_homepage_drift(self) -> None:
         observed = {
+            "QuantAlchemy/hello-convex-workos": "",
+            "QuantAlchemy/insights-alembic": "",
+            "QuantAlchemy/ucount-self-headless": "",
             "QuantAlchemy/solbeauty": "https://ben-hairstyle.vercel.app",
             "QuantAlchemy/trading-journal": (
                 "https://trading-journal-rho-sand.vercel.app"
@@ -409,6 +442,11 @@ class SeoFleetAuditTests(unittest.TestCase):
                 "fetch_repository_homepage",
                 side_effect=observed.__getitem__,
             ),
+            patch.object(
+                seo_fleet_audit, "fetch_repository_inventory_page",
+                return_value=[{"full_name": repo, "homepage": homepage}
+                              for repo, homepage in observed.items()],
+            ),
             redirect_stdout(output),
         ):
             status = seo_fleet_audit.main(
@@ -417,7 +455,7 @@ class SeoFleetAuditTests(unittest.TestCase):
 
         report = output.getvalue()
         self.assertEqual(1, status)
-        self.assertIn("2 classified non-production repositories", report)
+        self.assertIn("5 classified non-production repositories", report)
         self.assertIn("`QuantAlchemy/solbeauty`: **client**", report)
         self.assertIn("`QuantAlchemy/trading-journal`: **retired**", report)
         self.assertEqual(1, report.count("REPOSITORY_HOMEPAGE_MISMATCH"))
@@ -436,9 +474,21 @@ class SeoFleetAuditTests(unittest.TestCase):
                 seo_fleet_audit,
                 "fetch_repository_homepage",
                 side_effect={
+                    "QuantAlchemy/hello-convex-workos": "",
+                    "QuantAlchemy/insights-alembic": "",
+                    "QuantAlchemy/ucount-self-headless": "",
                     "QuantAlchemy/solbeauty": "https://www.solbeauty.studio/",
                     "QuantAlchemy/trading-journal": "",
                 }.__getitem__,
+            ),
+            patch.object(
+                seo_fleet_audit, "fetch_repository_inventory_page",
+                return_value=[
+                    {"full_name": item.repository, "homepage": item.expected_homepage}
+                    for item in seo_fleet_audit._load_repository_homepages(
+                        Path("config/public-sites.json")
+                    )
+                ],
             ),
             redirect_stdout(output),
         ):
@@ -448,7 +498,7 @@ class SeoFleetAuditTests(unittest.TestCase):
 
         report = output.getvalue()
         self.assertEqual(0, status)
-        self.assertIn("2 classified non-production repositories", report)
+        self.assertIn("5 classified non-production repositories", report)
         self.assertIn("Client production site", report)
         self.assertIn("Superseded by the Trading Journal", report)
         self.assertNotIn("REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY", report)

@@ -90,6 +90,24 @@
       "classification": "retired",
       "expected_homepage": "",
       "note": "Superseded by the Trading Journal at https://www.quant-companion.quantalchemy.io/journal."
+    },
+    {
+      "repository": "QuantAlchemy/hello-convex-workos",
+      "classification": "prototype",
+      "expected_homepage": "",
+      "note": "Internal authentication prototype, dev/test only. Not a public production site."
+    },
+    {
+      "repository": "QuantAlchemy/insights-alembic",
+      "classification": "prototype",
+      "expected_homepage": "",
+      "note": "Internal insights prototype, dev/test only. Not a public production site."
+    },
+    {
+      "repository": "QuantAlchemy/ucount-self-headless",
+      "classification": "prototype",
+      "expected_homepage": "",
+      "note": "Count development prototype, dev/test only. The real Count site is under the Count organization, not this repository. No canonical URL is assigned here."
     }
   ]
 }

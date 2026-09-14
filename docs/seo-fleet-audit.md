@@ -17,6 +17,7 @@ For every site in `config/public-sites.json`, the crawler verifies:
 - configured `required_noindex_paths` return direct HTTP 200 HTML, declare `noindex` through a `robots` meta tag or an `X-Robots-Tag` header, and stay crawlable for `User-agent: *`. A page `robots.txt` disallows never gets its `noindex` read, so that combination is reported as `REQUIRED_NOINDEX_UNREACHABLE` rather than passing.
 - configured `required_robots_disallow_paths` stay blocked for `User-agent: *`. Use this contract for private application routes and callbacks that should not be crawled. These paths are not fetched because their exclusion is the behavior under test.
 - repositories with non-production homepage metadata are explicitly classified as `prototype`, `client`, or `retired`. The audit verifies each configured homepage policy and reports stale links as `REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY` when no supported public deployment exists.
+- every normal run inventories GitHub organizations derived from the repository owners in `sites` and `repository_homepages`. A nonempty homepage without either policy produces `REPOSITORY_HOMEPAGE_UNCLASSIFIED` with the repository URL and exact observed homepage. No discovery flag is required.
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
@@ -52,13 +53,45 @@ Add public production sites to `sites`. Add repository-owned deployments that mu
 
 Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. `expected_homepage` is required and must be a string. Set it to an explicit HTTPS origin only when the non-production deployment should remain linked. Use an explicit empty string only when the owner-action tool should remove stale public metadata. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
 
+The following repositories are dev/test only. Their classification is `prototype`, and their expected homepage is empty:
+
+- `QuantAlchemy/hello-convex-workos`
+- `QuantAlchemy/insights-alembic`
+- `QuantAlchemy/ucount-self-headless`
+
+The real Count site is under the Count organization. Do not assign a guessed Count canonical URL to `QuantAlchemy/ucount-self-headless`. The eight configured production sites, including Netly's public contract, remain unchanged. `solbeauty` remains a client site, and `trading-journal` remains retired.
+
+Classification and homepage removal change discovery metadata only. They do not disable a deployment, add authentication, set `noindex`, or provide deployment protection. Use separate, authorized deployment controls when needed.
+
 Morning Edge and other dynamic inventory jobs must use this audit receipt as the classification source of truth. They must not treat every non-empty GitHub homepage field as a QuantAlchemy production website.
+
+## Inventory coverage and failure contract
+
+Discovery is read-only. It reads repository metadata through the authenticated `gh` CLI. It does not fetch discovered homepage URLs, add sites or policies, or update GitHub settings. An owner must classify each new finding before it can enter the production fleet. The owner-action tool still acts only on configured targets.
+
+Organization owners are matched without case sensitivity and queried once in sorted order. The inventory requests all repository types, including archived and forked repositories, in pages of 100. It stops after a short or empty page. Each request has a 10-second deadline and a 5 MiB combined stdout/stderr limit. The runner requires POSIX process support. The limit is 100 pages per organization; reaching it without a terminal page is an operational failure, not complete coverage.
+
+Each page must be a JSON array. Every row must contain a valid `full_name` for the requested organization and an explicit `homepage` string or null. Null means no homepage. Duplicate repositories are matched without case sensitivity and counted once. Identical duplicates use deterministic spelling; conflicting homepage values fail the inventory. Homepage strings are not normalized. Strings must be valid UTF-8, and Markdown observations use code blocks that cannot be closed by the observed text. A malformed page is not counted; validated earlier pages and their findings remain in the receipt.
+
+Coverage is limited to repositories visible to the current credential. A successful response cannot prove that the credential can see every private repository. Use a credential with metadata read access to all intended repositories. Missing CLI authentication, API errors, rate limits, invalid responses, and time or output limits produce `REPOSITORY_INVENTORY_LOOKUP_FAILED`. An empty inventory is valid but proves only that no repositories were returned. Configurations without repository owners have no organization inventory; legacy site-list configurations still derive owners from their repositories.
+
+JSON receipts include a `repositoryInventory` array. Each organization reports `complete`, `healthy`, `pageCount`, `checkedRepositories`, `nonemptyHomepages`, `classifiedRepositories`, `unclassifiedHomepages`, and `findings`. Counts refer to unique repositories in validated pages. `classifiedRepositories` counts visible repositories with either policy, including those with empty homepages. `unclassifiedHomepages` counts visible repositories with a nonempty homepage and no policy. Markdown reports the same coverage counts and findings. The top-level JSON `healthy` value requires healthy site, homepage-policy, and inventory audits.
+
+Exit statuses:
+
+| Status | Meaning |
+| --- | --- |
+| `0` | All configured checks and visible inventory checks are healthy. |
+| `1` | Defects exist, including unknown nonempty homepages or classified homepage drift. |
+| `2` | A GitHub homepage or inventory lookup failed. Requested receipts are still written. This status takes priority over defects from successful checks or earlier pages. |
+
+To clear configured dev homepage fields, use `tools/update_repo_homepages.py` with an owner credential that has repository Administration write permission. A `403 Resource not accessible by integration` response means that metadata cleanup is blocked. Classification in this source file does not prove that the live GitHub fields were cleared.
 
 ## Local verification
 
 ```bash
-python3 -m unittest tests/test_seo_fleet_audit.py tests/test_update_repo_homepages.py -v
-python3 tools/seo_fleet_audit.py \
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
+python3 -B tools/seo_fleet_audit.py \
   --config config/public-sites.json \
   --markdown-out /tmp/weekly-seo-fleet-audit.md \
   --json-out /tmp/weekly-seo-fleet-audit.json
