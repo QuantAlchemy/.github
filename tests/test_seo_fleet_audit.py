@@ -168,7 +168,7 @@ class SeoFleetAuditTests(unittest.TestCase):
             netly,
         )
 
-    def test_public_sites_config_classifies_zombie_homepages(self) -> None:
+    def test_public_sites_config_preserves_nonproduction_homepages(self) -> None:
         payload = json.loads(Path("config/public-sites.json").read_text(encoding="utf-8"))
 
         self.assertEqual(
@@ -202,7 +202,10 @@ class SeoFleetAuditTests(unittest.TestCase):
         )
         for row in prototypes:
             self.assertEqual("prototype", row["classification"])
-            self.assertEqual("", row["expected_homepage"])
+            self.assertEqual(
+                f"https://{row['repository'].split('/')[1]}.vercel.app",
+                row["expected_homepage"],
+            )
             self.assertIn("dev/test only", row["note"])
         self.assertEqual(
             [
@@ -425,9 +428,9 @@ class SeoFleetAuditTests(unittest.TestCase):
 
     def test_main_reports_classified_nonproduction_homepage_drift(self) -> None:
         observed = {
-            "QuantAlchemy/hello-convex-workos": "",
-            "QuantAlchemy/insights-alembic": "",
-            "QuantAlchemy/ucount-self-headless": "",
+            "QuantAlchemy/hello-convex-workos": "https://hello-convex-workos.vercel.app",
+            "QuantAlchemy/insights-alembic": "https://insights-alembic.vercel.app",
+            "QuantAlchemy/ucount-self-headless": "https://ucount-self-headless.vercel.app",
             "QuantAlchemy/solbeauty": "https://ben-hairstyle.vercel.app",
             "QuantAlchemy/trading-journal": (
                 "https://trading-journal-rho-sand.vercel.app"
@@ -474,9 +477,9 @@ class SeoFleetAuditTests(unittest.TestCase):
                 seo_fleet_audit,
                 "fetch_repository_homepage",
                 side_effect={
-                    "QuantAlchemy/hello-convex-workos": "",
-                    "QuantAlchemy/insights-alembic": "",
-                    "QuantAlchemy/ucount-self-headless": "",
+                    "QuantAlchemy/hello-convex-workos": "https://hello-convex-workos.vercel.app",
+                    "QuantAlchemy/insights-alembic": "https://insights-alembic.vercel.app",
+                    "QuantAlchemy/ucount-self-headless": "https://ucount-self-headless.vercel.app",
                     "QuantAlchemy/solbeauty": "https://www.solbeauty.studio/",
                     "QuantAlchemy/trading-journal": "",
                 }.__getitem__,
