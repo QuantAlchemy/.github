@@ -94,20 +94,20 @@
     {
       "repository": "QuantAlchemy/hello-convex-workos",
       "classification": "prototype",
-      "expected_homepage": "",
-      "note": "Internal authentication prototype, dev/test only. Not a public production site."
+      "expected_homepage": "https://hello-convex-workos.vercel.app",
+      "note": "Internal authentication prototype, dev/test only. Not a public production site. Preserve the homepage as an owner navigation shortcut."
     },
     {
       "repository": "QuantAlchemy/insights-alembic",
       "classification": "prototype",
-      "expected_homepage": "",
-      "note": "Internal insights prototype, dev/test only. Not a public production site."
+      "expected_homepage": "https://insights-alembic.vercel.app",
+      "note": "Internal insights prototype, dev/test only. Not a public production site. Preserve the homepage as an owner navigation shortcut."
     },
     {
       "repository": "QuantAlchemy/ucount-self-headless",
       "classification": "prototype",
-      "expected_homepage": "",
-      "note": "Count development prototype, dev/test only. The real Count site is under the Count organization, not this repository. No canonical URL is assigned here."
+      "expected_homepage": "https://ucount-self-headless.vercel.app",
+      "note": "Count development prototype, dev/test only. The real Count site is under the Count organization, not this repository. No canonical URL is assigned here. Preserve the homepage as an owner navigation shortcut."
     }
   ]
 }

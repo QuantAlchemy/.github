@@ -16,7 +16,7 @@ For every site in `config/public-sites.json`, the crawler verifies:
 - configured `required_canonical_paths` return direct HTTP 200 HTML and declare exactly one matching canonical link;
 - configured `required_noindex_paths` return direct HTTP 200 HTML, declare `noindex` through a `robots` meta tag or an `X-Robots-Tag` header, and stay crawlable for `User-agent: *`. A page `robots.txt` disallows never gets its `noindex` read, so that combination is reported as `REQUIRED_NOINDEX_UNREACHABLE` rather than passing.
 - configured `required_robots_disallow_paths` stay blocked for `User-agent: *`. Use this contract for private application routes and callbacks that should not be crawled. These paths are not fetched because their exclusion is the behavior under test.
-- repositories with non-production homepage metadata are explicitly classified as `prototype`, `client`, or `retired`. The audit verifies each configured homepage policy and reports stale links as `REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY` when no supported public deployment exists.
+- repositories with non-production homepage metadata are explicitly classified as `prototype`, `client`, or `retired`. The audit verifies each configured homepage policy. Non-production links are valid owner navigation shortcuts, not declarations of a public product. `REPOSITORY_HOMEPAGE_SHOULD_BE_EMPTY` applies only when an explicit owner-approved policy requires an empty field.
 - every normal run inventories GitHub organizations derived from the repository owners in `sites` and `repository_homepages`. A nonempty homepage without either policy produces `REPOSITORY_HOMEPAGE_UNCLASSIFIED` with the repository URL and exact observed homepage. No discovery flag is required.
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
@@ -46,24 +46,24 @@ Add public production sites to `sites`. Add repository-owned deployments that mu
 {
   "repository": "QuantAlchemy/example",
   "classification": "prototype",
-  "expected_homepage": "",
-  "note": "Internal prototype with no supported public deployment."
+  "expected_homepage": "https://example-dev.vercel.app",
+  "note": "Internal prototype. Preserve the owner navigation shortcut; exclude from the production fleet."
 }
 ```
 
-Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. `expected_homepage` is required and must be a string. Set it to an explicit HTTPS origin only when the non-production deployment should remain linked. Use an explicit empty string only when the owner-action tool should remove stale public metadata. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
+Use `prototype` for experiments, `client` for client-owned work that is not a QuantAlchemy production surface, and `retired` for superseded products. `expected_homepage` is required and must be a string. Set it to the intended HTTPS origin to preserve an owner-useful shortcut, including a private or authenticated deployment. Non-production status alone is not a reason to clear the field. Use an explicit empty string only when the owner has approved removing an obsolete link. A repository may appear only once across `sites` and `repository_homepages`; duplicate policies are rejected before any audit or update.
 
-The following repositories are dev/test only. Their classification is `prototype`, and their expected homepage is empty:
+The following repositories are dev/test only. Their classification remains `prototype`, and their homepage links are preserved for owner navigation:
 
-- `QuantAlchemy/hello-convex-workos`
-- `QuantAlchemy/insights-alembic`
-- `QuantAlchemy/ucount-self-headless`
+- `QuantAlchemy/hello-convex-workos`: `https://hello-convex-workos.vercel.app`
+- `QuantAlchemy/insights-alembic`: `https://insights-alembic.vercel.app`
+- `QuantAlchemy/ucount-self-headless`: `https://ucount-self-headless.vercel.app`
 
 The real Count site is under the Count organization. Do not assign a guessed Count canonical URL to `QuantAlchemy/ucount-self-headless`. The eight configured production sites, including Netly's public contract, remain unchanged. `solbeauty` remains a client site, and `trading-journal` remains retired.
 
-Classification and homepage removal change discovery metadata only. They do not disable a deployment, add authentication, set `noindex`, or provide deployment protection. Use separate, authorized deployment controls when needed.
+Classification keeps these links out of the production fleet; it does not fetch or validate their deployments. Keeping or removing a GitHub homepage does not establish deployment privacy, authentication, or indexability. Assess those separately with authorized deployment controls when needed.
 
-Morning Edge and other dynamic inventory jobs must use this audit receipt as the classification source of truth. They must not treat every non-empty GitHub homepage field as a QuantAlchemy production website.
+Morning Edge and other dynamic inventory jobs must use this audit receipt as the classification source of truth. They must not treat every non-empty GitHub homepage field as a QuantAlchemy production website. The former empty-homepage findings for these three prototypes were policy false positives, not unresolved cleanup or router leaks.
 
 ## Inventory coverage and failure contract
 
@@ -85,7 +85,7 @@ Exit statuses:
 | `1` | Defects exist, including unknown nonempty homepages or classified homepage drift. |
 | `2` | A GitHub homepage or inventory lookup failed. Requested receipts are still written. This status takes priority over defects from successful checks or earlier pages. |
 
-To clear configured dev homepage fields, use `tools/update_repo_homepages.py` with an owner credential that has repository Administration write permission. A `403 Resource not accessible by integration` response means that metadata cleanup is blocked. Classification in this source file does not prove that the live GitHub fields were cleared.
+No repository Administration write permission is needed to accept the preserved prototype links. Do not run homepage removal as a follow-up for these repositories. The owner-action tool remains available for separately authorized metadata corrections, including the existing retired-repository policy.
 
 ## Local verification
 

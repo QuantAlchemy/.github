@@ -68,6 +68,19 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
             targets,
         )
 
+    def test_owner_shortcuts_do_not_generate_homepage_updates(self) -> None:
+        targets = update_repo_homepages.load_targets(Path("config/public-sites.json"))
+        observed = {
+            "QuantAlchemy/hello-convex-workos": "https://hello-convex-workos.vercel.app",
+            "QuantAlchemy/insights-alembic": "https://insights-alembic.vercel.app",
+            "QuantAlchemy/ucount-self-headless": "https://ucount-self-headless.vercel.app",
+        }
+        shortcuts = [target for target in targets if target.repository in observed]
+        self.assertEqual(set(observed), {target.repository for target in shortcuts})
+        self.assertEqual(
+            [], update_repo_homepages.find_updates(shortcuts, observed.__getitem__)
+        )
+
     def test_find_updates_reports_missing_and_mismatched_homepages_only(self) -> None:
         targets = [
             update_repo_homepages.HomepageTarget(
