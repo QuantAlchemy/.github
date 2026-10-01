@@ -24,9 +24,14 @@
       ]
     },
     {
-      "name": "AI Algo Factory",
-      "origin": "https://ai-algo-factory.quantalchemy.io",
-      "repository": "QuantAlchemy/ai-algo-factory"
+      "name": "Algo Factory",
+      "origin": "https://algo-factory.quantalchemy.io",
+      "repository": "QuantAlchemy/algo-factory",
+      "expected_text_paths": [
+        "/llms.txt",
+        "/llms-full.txt",
+        "/ai.txt"
+      ]
     },
     {
       "name": "Jest",

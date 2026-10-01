@@ -68,6 +68,22 @@ class UpdateRepoHomepagesTests(unittest.TestCase):
             targets,
         )
 
+    def test_algo_factory_policy_uses_only_the_renamed_repository(self) -> None:
+        targets = update_repo_homepages.load_targets(Path("config/public-sites.json"))
+        repository = "QuantAlchemy/algo-factory"
+        origin = "https://algo-factory.quantalchemy.io"
+        self.assertEqual(
+            [update_repo_homepages.HomepageTarget(repository, origin)],
+            [target for target in targets if "algo-factory" in target.repository],
+        )
+        target = next(target for target in targets if target.repository == repository)
+        self.assertEqual([], update_repo_homepages.find_updates([target], lambda _: origin))
+        old_origin = "https://ai-algo-factory.quantalchemy.io"
+        self.assertEqual(
+            [update_repo_homepages.HomepageUpdate(repository, origin, old_origin)],
+            update_repo_homepages.find_updates([target], lambda _: old_origin),
+        )
+
     def test_owner_shortcuts_do_not_generate_homepage_updates(self) -> None:
         targets = update_repo_homepages.load_targets(Path("config/public-sites.json"))
         observed = {

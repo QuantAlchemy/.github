@@ -136,6 +136,19 @@ class SeoFleetAuditTests(unittest.TestCase):
             [finding.code for finding in audit.findings],
         )
 
+    def test_public_sites_config_contains_algo_factory_crawler_contract(self) -> None:
+        payload = json.loads(Path("config/public-sites.json").read_text(encoding="utf-8"))
+        factory = [site for site in payload["sites"] if "algo-factory" in site["repository"]]
+        self.assertEqual(
+            [{
+                "name": "Algo Factory",
+                "origin": "https://algo-factory.quantalchemy.io",
+                "repository": "QuantAlchemy/algo-factory",
+                "expected_text_paths": ["/llms.txt", "/llms-full.txt", "/ai.txt"],
+            }],
+            factory,
+        )
+
     def test_public_sites_config_contains_netly_canary_contract(self) -> None:
         payload = json.loads(Path("config/public-sites.json").read_text(encoding="utf-8"))
         netly = next(site for site in payload["sites"] if site["name"] == "Netly")
@@ -210,7 +223,7 @@ class SeoFleetAuditTests(unittest.TestCase):
         self.assertEqual(
             [
                 "QuantAlchemy/qa-website", "QuantAlchemy/krown-website",
-                "QuantAlchemy/krown-ai", "QuantAlchemy/ai-algo-factory",
+                "QuantAlchemy/krown-ai", "QuantAlchemy/algo-factory",
                 "QuantAlchemy/jest-qa", "QuantAlchemy/quant-companion",
                 "QuantAlchemy/clickalchemy", "QuantAlchemy/netly",
             ],

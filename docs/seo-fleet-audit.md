@@ -21,6 +21,14 @@ For every site in `config/public-sites.json`, the crawler verifies:
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
+## Algo Factory crawler cutover
+
+The fleet uses `https://algo-factory.quantalchemy.io` and `QuantAlchemy/algo-factory` as the canonical site and repository. The `sites` entry also defines its GitHub homepage policy. Do not add a duplicate entry under `repository_homepages`, which is for non-production classifications.
+
+The audit requires direct HTTP 200 plain text at `/ai.txt`, `/llms.txt`, and `/llms-full.txt`. A sign-in redirect fails this contract even if its destination returns HTTP 200. It also fetches every sitemap URL, so the check covers the full public strategy catalog rather than a fixed sample.
+
+Deploy the companion Algo Factory change that adds public `/ai.txt` before expecting a healthy live receipt. A local pass does not prove that production has that route. Updating the fleet configuration does not deploy the app or change old-domain redirects.
+
 ## Repository homepage owner action
 
 Repository homepage settings require repository administration permission. Preview the exact settings that differ from the canonical fleet map:
