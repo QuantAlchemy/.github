@@ -21,6 +21,33 @@ For every site in `config/public-sites.json`, the crawler verifies:
 
 The run produces Markdown and JSON receipts with the exact requested URL, expected result, observed status/final URL, and defect code. The scheduled Hermes job delivers the Markdown receipt to the task thread; JSON is retained locally for machine processing. An authenticated `gh` CLI is required because some mapped repositories are private. A GitHub lookup failure exits with operational status `2`; homepage drift remains the normal defect status `1`.
 
+## Ad hoc brief ownership checks
+
+Morning Growth and other agent-written briefs must apply
+[the public-site monitoring contract](public-site-monitoring-contract.txt)
+before probing or reporting a product routing defect. Copy that contract into
+the scheduled job prompt so the check does not depend on chat memory.
+
+Use the current default-branch fleet mapping and corroborate its repository-to-origin
+assignment with source or deployment evidence. Missing or conflicting evidence is
+an ownership gap, not proof of a broken product. Preserve narrower user scope.
+The fleet crawler already uses configured origins; this contract fixes the
+separate ad hoc host-selection step in the brief, not the crawler or website.
+
+Validate the contract against these cases when updating a job:
+
+- A configured Krown origin with matching source evidence can be checked.
+- A same-named foreign domain is excluded, even if its paths return 404.
+- A redirect to a known host does not by itself verify a legacy alias.
+- A missing map or conflicting source produces a coverage gap, not an all-clear.
+- A prototype homepage stays available to its owner but is not a production target.
+- A verified site's 404 remains reportable with its route contract and receipts.
+
+Do not rerun a publishing job merely to test its instructions. Read back the
+persisted prompt and confirm that the schedule, delivery, model, and unrelated
+sections did not change. A prompt update is not a deterministic enforcement
+mechanism and does not prove that a later agent run will comply.
+
 ## Algo Factory crawler cutover
 
 The fleet uses `https://algo-factory.quantalchemy.io` and `QuantAlchemy/algo-factory` as the canonical site and repository. The `sites` entry also defines its GitHub homepage policy. Do not add a duplicate entry under `repository_homepages`, which is for non-production classifications.
